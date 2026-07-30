@@ -1,0 +1,258 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* Rainline's palette: a "barometric" storm-glass scheme — cool slate/teal
+   base, a single warm amber accent reserved for severity/action, distinct
+   from permamission's coal/gold parchment and webwitness's near-black
+   forensic blue. Structured the same way disputr's globals.css structures
+   its theme (HSL custom properties consumed by Tailwind color tokens, a
+   soft elevated-card shadow, a subtle background texture) but with its own
+   values and its own texture motif (isobar rings instead of a paper grid). */
+/* Dark is Rainline's default look, independent of system/browser preference —
+   set explicitly via a data-theme attribute (see components/theme-toggle.tsx),
+   not @media (prefers-color-scheme). :root[data-theme="light"] is the opt-out. */
+:root,
+:root[data-theme="dark"] {
+  --background: 205 38% 8%;
+  --foreground: 204 30% 94%;
+  --card: 205 32% 12%;
+  --card-foreground: 204 30% 94%;
+  --primary: 199 70% 62%;
+  --primary-foreground: 205 38% 8%;
+  --secondary: 190 30% 60%;
+  --secondary-foreground: 205 38% 8%;
+  --muted: 205 22% 18%;
+  --muted-foreground: 204 14% 68%;
+  --accent: 32 85% 60%;
+  --accent-foreground: 205 38% 8%;
+  --border: 205 20% 24%;
+  --input: 205 20% 22%;
+  --ring: 199 70% 60%;
+  --good: 152 40% 55%;
+  --warn: 32 85% 60%;
+  --bad: 4 70% 62%;
+}
+
+:root[data-theme="light"] {
+  --background: 204 32% 96%;
+  --foreground: 204 45% 10%;
+  --card: 204 40% 99%;
+  --card-foreground: 204 45% 10%;
+  --primary: 199 68% 24%;
+  --primary-foreground: 204 60% 97%;
+  --secondary: 190 35% 40%;
+  --secondary-foreground: 204 60% 97%;
+  --muted: 204 20% 90%;
+  --muted-foreground: 204 12% 40%;
+  --accent: 32 88% 55%;
+  --accent-foreground: 204 45% 10%;
+  --border: 204 20% 82%;
+  --input: 204 20% 84%;
+  --ring: 199 68% 30%;
+  --good: 152 45% 32%;
+  --warn: 32 88% 45%;
+  --bad: 4 70% 45%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 12% 8%, hsl(var(--primary) / 0.08), transparent 32rem),
+    radial-gradient(circle at 88% 92%, hsl(var(--accent) / 0.08), transparent 32rem),
+    hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+}
+
+::selection {
+  background: hsl(var(--accent) / 0.35);
+}
+
+.rl-card {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.375rem;
+  box-shadow: 0 14px 40px hsl(var(--primary) / 0.07);
+}
+
+.rl-isobars {
+  background-image: radial-gradient(hsl(var(--primary) / 0.14) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+
+.rl-divider {
+  border-left: 1px solid hsl(var(--border));
+}
+
+.rl-station {
+  position: relative;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+  border-radius: 0.375rem;
+}
+.rl-station::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 1.25rem;
+  width: 2.5rem;
+  height: 4px;
+  background: hsl(var(--accent));
+  border-radius: 0 0 3px 3px;
+}
+
+.rl-gauge {
+  border: 1px dashed hsl(var(--border));
+  border-radius: 0.25rem;
+  padding: 0.9rem 1rem;
+  position: relative;
+}
+.rl-gauge::after {
+  content: attr(data-tick);
+  position: absolute;
+  top: 0.4rem;
+  right: 0.6rem;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  color: hsl(var(--muted-foreground) / 0.6);
+}
+
+.rl-log-entry {
+  border-left: 2px solid hsl(var(--primary) / 0.35);
+  padding-left: 1rem;
+}
+
+.rl-tag {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.65rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+
+.rl-step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--primary) / 0.4);
+  color: hsl(var(--primary));
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.75rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.rl-eyebrow {
+  font-size: 0.6875rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+  font-weight: 600;
+}
+
+.rl-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border));
+  padding: 0.25rem 0.625rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.rl-btn-primary {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  border-radius: 0.5rem;
+  font-weight: 600;
+  transition: filter 120ms ease, transform 120ms ease;
+}
+.rl-btn-primary:hover {
+  filter: brightness(1.08);
+}
+.rl-btn-primary:active {
+  transform: translateY(1px);
+}
+.rl-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rl-btn-ghost {
+  background: transparent;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.5rem;
+  color: hsl(var(--foreground));
+  font-weight: 500;
+}
+.rl-btn-ghost:hover {
+  background: hsl(var(--muted) / 0.5);
+}
+
+.rl-input {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--input));
+  border-radius: 0.5rem;
+  color: hsl(var(--foreground));
+  padding: 0.55rem 0.7rem;
+  font-size: 0.9rem;
+}
+.rl-input:focus {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 1px;
+}
+
+.rl-mono {
+  font-family: var(--font-mono), ui-monospace, monospace;
+}
+
+@keyframes rl-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.rl-pulse {
+  animation: rl-pulse 1.6s ease-in-out infinite;
+}
+
+.rl-skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  padding: 0.5rem 1rem;
+  z-index: 100;
+}
+.rl-skip-link:focus {
+  left: 1rem;
+  top: 1rem;
+}
