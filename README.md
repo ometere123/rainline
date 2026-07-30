@@ -151,15 +151,40 @@ LEADER_TIMEOUT are surfaced as retryable states rather than hard errors
 
 ## Deployed contract (StudioNet)
 
-- **Address**: `0x385049Cf21660863c06a18f5eaA77e6a8A3dA352`
-- **Explorer**: https://genlayer-explorer.vercel.app/address/0x385049Cf21660863c06a18f5eaA77e6a8A3dA352
-- **Deploy tx**: `0x436c33edc9f9669da4ae7116b5d3193637fb4a81d0cf8146bdc343a6570c92aa`
+- **Address**: `0x109b867c1d4757976afA66e180bd1a6dA890634C`
+- **Explorer**: https://genlayer-explorer.vercel.app/address/0x109b867c1d4757976afA66e180bd1a6dA890634C
+- **Deploy tx**: `0x6d557596b5b187fa3af46b54831643e4051488a3c0343e495edfe7ae42dbbd1e`
 
-This is the redeployment carrying the solvency-gate fix and the real-meteorological-API evidence
-layer; every executable line in `contracts/Rainline.py` changed, so previous addresses were
-retired. `.env.local`, `scripts/verify-schema.mjs`'s target, and this document all point at the
-address above. Schema check: `node scripts/verify-schema.mjs` → `Schema verified for
-0x385049Cf21660863c06a18f5eaA77e6a8A3dA352.`
+This is the current deployment, carrying the solvency gate, the real-meteorological-API evidence
+layer, and the no-retroactive-cover guard. `.env.local`, `scripts/verify-schema.mjs`'s target, and
+this document all point at it. Schema check: `node scripts/verify-schema.mjs` → `Schema verified
+for 0x109b867c1d4757976afA66e180bd1a6dA890634C.`
+
+### No retroactive cover
+
+`buy_policy` requires `coverage_start` to be strictly after the transaction timestamp. Without
+this, a buyer could open a policy over a window that had already elapsed — insuring a storm they
+already knew had happened — and claim on it immediately, which is guaranteed adverse selection
+against every other holder in the pool.
+
+Because the check is a lexicographic string comparison, both bounds are format-validated first
+(`_require_iso_utc`): a non-numeric string like `"zzzz…"` sorts above every real timestamp and
+would otherwise read as far-future and walk straight past the gate. That specific bypass is caught
+one step earlier by the existing `coverage_end > coverage_start` ordering check, so the two
+together leave no lexicographic way around it. Both paths have tests. An unreadable clock fails
+closed.
+
+**This guard invalidated the earlier Harvey purchase, on purpose.** Re-running the exact same
+retroactive `buy_policy` call against this deployment now reverts on-chain — tx
+`0x6b23e134487ed32666027ad063dc9e0703efe5a0ff7dd91a61b34e199c59e6f5`, `execution_result: ERROR`,
+`"[EXPECTED] Coverage must start in the future, retroactive cover is not allowed"`.
+
+There is a real tension worth stating plainly: correct insurance semantics (cover must be bound
+before the risk period) collide with reanalysis publication lag (ERA5 is near-real-time but NASA
+POWER lags by days). A claim checked the moment coverage ends will often find one source still
+empty. That is exactly what the abstention-plus-cooldown design is for — the ticket stays
+claimable and anyone can pull a fresh reading once the data publishes, rather than the contract
+guessing from half the evidence.
 
 ### Real on-chain proof (not simulated)
 
@@ -168,14 +193,42 @@ The `genlayer` CLI's `write` command hardcodes `value: 0n`, so it cannot exercis
 `createClient`, `createAccount`, `writeContract` with a real non-zero `value: bigint`,
 `waitForTransactionReceipt` — to call `buy_policy` and `check_claim` with actual GEN on StudioNet.
 
-**All three write methods have been exercised on-chain.** The claim run below insures a real,
-independently verifiable historical event: Hurricane Harvey over Houston, 26–29 Aug 2017.
+**All three write methods have been exercised on-chain.**
+
+#### On the current deployment (`0x109b…634C`, with the retroactive-cover guard)
+
+| Step | Tx | Result |
+|---|---|---|
+| `buy_policy` (payable, **100 GEN**, future window) | `0x0b3fc48ac533e4f24ce78497fcecf926039c89870d577c0ed378a903c9607536` | `FINALIZED` — `RLN-1` created, `pool_balance` 100 GEN, liability 20 GEN |
+| `buy_policy` with a **past** window | `0x6b23e134487ed32666027ad063dc9e0703efe5a0ff7dd91a61b34e199c59e6f5` | `execution_result: ERROR` — retroactive cover correctly refused |
+| `check_claim` (consensus, 3 real fetches) | `0x49a357125b2db77054bf79d5333eb23fafeeb9d93895047753d6eec88bf8a871` | `FINALIZED` — verdict **`NONE`**, policy `DECLINED` |
+
+That claim round is worth reading, because the model handled a genuinely messy evidence set
+correctly without being told how:
+
+> "SOURCE A provided a concrete and plausible precipitation value of **0.20 mm**, which is well
+> below the policy threshold of 100 mm. SOURCE B returned a **fill_value (-999.0 mm)**, indicating
+> missing or invalid data, and thus cannot be used as evidence. SOURCE C contained no reports of a
+> flood event in Houston on or near the coverage date. Therefore, the evidence supports a verdict
+> of NONE."
+
+It recognised NASA POWER's `-999.0` sentinel as missing data rather than reading it as negative
+rainfall, and declined on the strength of the one source that had real data. The contract paid
+nothing, which is the correct outcome for a quiet week.
+
+#### The payout proof (`0x3850…A352`, identical except the guard was added afterward)
+
+Insuring a real, independently verifiable historical event — Hurricane Harvey over Houston,
+26–29 Aug 2017 — which the current guard now correctly forbids:
 
 | Step | Tx | Result |
 |---|---|---|
 | `buy_policy` (payable, **100 GEN** premium, 20 GEN payout) | `0x3033bc9f2b92f495b38e211777b434a6a881285a26ebf3d1b19d4703ed03d89b` | `FINALIZED` — created `RLN-1`; `pool_balance` 100 GEN, `outstanding_liability` 20 GEN |
 | `check_claim` (consensus round, 3 real fetches + 1 reconciliation) | `0xe63f20f2a4d47d63f11076e3868b91ee9c5309f5ea275bc51283dc6aa530f4bb` | `FINALIZED` — verdict **`SEVERE`**, policy **`PAID_OUT`** |
 | `expire_unclaimed` (permissionless sweep of `RLN-2`) | ACCEPTED, 5/5 validators AGREE | `EXPIRED_NO_CLAIM`, liability released 5 GEN → 0 |
+
+The payout logic is byte-identical between the two deployments; only `buy_policy`'s date guard
+differs. Both records are kept here rather than presenting only the flattering one.
 
 **The payout actually moved value.** `get_summary()` before the claim: `pool_balance =
 100000000000000000000`, `outstanding_liability = 20000000000000000000`. After: `pool_balance =
@@ -219,7 +272,13 @@ attempt before it are superseded; see git history for the address progression.
 python -m pytest tests/direct/ -v
 ```
 
-Result: **43 passed**. Coverage added for the solvency gate: payout accepted at exactly 10x premium
+Result: **48 passed**. Five tests cover the no-retroactive-cover guard: a window that has already
+elapsed is refused, `coverage_start == now` is refused (the boundary itself), one second later is
+accepted (the other side of it), a malformed timestamp that clears the ordering check is caught by
+the format check, and a garbage value that sorts above every real timestamp is caught by the
+ordering check.
+
+Coverage for the solvency gate: payout accepted at exactly 10x premium
 and rejected one wei over, payout accepted at exactly the 20% pool-fraction cap and rejected one
 wei over, an adversarial multi-policy attack that stays inside the per-policy 20% cap on every
 purchase but is caught by the aggregate liability invariant, and liability release on both
@@ -258,11 +317,17 @@ receipt whose `consensus_data.leader_receipt[0].execution_result` is `"ERROR"`, 
 the real API and to respect the new solvency-gate premium/payout amounts, plus one new test
 (`test_buy_policy_rejects_payout_exceeding_solvency_gate`) exercising the on-chain revert.
 
-Result: **6 passed in 246.04s (0:04:06)** against the current contract — deploy, a real payable
+Because `buy_policy` refuses retroactive cover, these can no longer hardcode a coverage window —
+a fixed date would be in the past by the time the suite ran, and an import-time value would go
+stale partway through a five-minute run. Each test now derives its own short window starting
+seconds in the future via `_window()`.
+
+Result: **6 passed in 322.28s (0:05:22)** against the current contract — deploy, a real payable
 `buy_policy`, a rejected zero-value call, a rejected over-cap `buy_policy`, a rejected pre-window
 `check_claim`, and a live `check_claim` consensus round that resolved to a valid severity band.
 Dominated by the one live consensus round
-(`test_check_claim_runs_live_consensus_after_coverage_ends`).
+(`test_check_claim_runs_live_consensus_after_coverage_ends`), which now also waits out a real
+coverage window before claiming.
 
 ### Static checks
 
@@ -308,10 +373,15 @@ Run against a local `npm run dev` instance pointed at the redeployed contract:
   Activity" correctly shows its own empty state.
 - **The Ledger** (`/policies`): lists the real on-chain policies read live from the contract, not
   a cached copy.
-- **Deep link** (`/policy/RLN-1`): shows the real holder address, coverage window, the `SEVERE`
-  verdict, all three evidence summaries with the real ERA5 / NASA POWER figures, and the stored
-  rationale. Timestamps, staked/payout amounts, and copy voice ("The Ledger" / "Open a Ticket" /
-  "Your Tickets") are consistent with the redesign.
+- **Deep link** (`/policy/RLN-1`): shows the real holder address, coverage window, the stored
+  verdict (currently `NONE`, rendered as "Logged clear"), all three evidence summaries with the
+  real ERA5 / NASA POWER figures, and the rationale. Timestamps, staked/payout amounts, and copy
+  voice ("The Ledger" / "Open a Ticket" / "Your Tickets") are consistent with the redesign.
+- **Buy-cover preflight**: setting the coverage start to a past date and submitting is blocked in
+  the browser with "Coverage must start at least a few minutes from now", and no transaction is
+  sent — verified by driving the live form, not by reading the code.
+- **Wallet dropdown**: opening it no longer shifts the page. The header's bounding rect is
+  byte-identical with the panel open and closed, and the body has no horizontal overflow.
 - No console errors were observed on any of the pages above.
 - **Injected `window.ethereum` wallet path**: not verified in this session — the automated
   browser environment available here has no real wallet extension installed, so this path could
@@ -328,12 +398,21 @@ Run against a local `npm run dev` instance pointed at the redeployed contract:
 - **Solvency gate is a simplification, not actuarial pricing.** See "The solvency gate" above.
   The 10x and 20% constants are fixed and auditable, not fitted to any loss model. A production
   insurer would price on peril, location, seasonality and historical loss data.
-- **Retroactive cover is not blocked.** `buy_policy` validates that `coverage_end > coverage_start`
-  but does not require `coverage_start` to be in the future, so a policy can be opened over a
-  window that has already elapsed. This is what made the Hurricane Harvey proof above possible,
-  and it is also a genuine adverse-selection hole: someone can insure a storm they already know
-  happened. A production version needs a `coverage_start > now` guard. It is called out here
-  rather than left for a reviewer to find.
+- **A reverted payable write does not refund the premium.** This is a real, verified defect, not a
+  hypothetical. `gl.message.value` moves to the contract *before* the method body runs, so when
+  `buy_policy` raises, the state change is rolled back but the GEN is not returned — it sits in
+  `self.balance` with no policy and no `pool_balance` credit. Proven on-chain by tx
+  `0x6b23e134487ed32666027ad063dc9e0703efe5a0ff7dd91a61b34e199c59e6f5`, which correctly reverted
+  on the retroactive-cover guard and left 100 GEN stranded. The gap is directly observable in
+  `get_summary()` on the live contract right now: `contract_balance = 200 GEN` against
+  `pool_balance = 100 GEN`. The 100 GEN difference is that stranded premium, held by the contract
+  but backing nothing. **Mitigated, not fully fixed**: every
+  `[EXPECTED]` condition is now revalidated client-side in `preflightError`
+  (`src/components/write-actions.tsx`) so the transaction is never sent in the first place. A
+  production fix needs `buy_policy` to refund-and-return instead of raising, which changes its
+  return contract and every revert-based test, or a reconciliation sweep that credits untracked
+  balance back into the pool. Neither was attempted here rather than risk the solvency accounting
+  that is currently proven correct.
 - **Grid resolution is a real limit on the evidence, even with real APIs.** ERA5 (~9–31km) and
   NASA POWER (~50km) are both gridded products. Neither is a gauge sitting in the insured field,
   so a sharply localised event can still be smoothed away by both. The three-source design
