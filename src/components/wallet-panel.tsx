@@ -57,7 +57,7 @@ export function WalletPanel() {
         <KeyRound size={14} aria-hidden /> {wallet.mode === "none" ? "Connect wallet" : shortenAddress(wallet.address)}
       </button>
       {open ? (
-        <div className="rl-station absolute right-0 z-20 mt-3 w-80 p-4">
+        <div className="rl-station rl-popover right-0 z-20 mt-3 w-80 p-4">
           <span className="rl-tag">Active identity</span>
           <div className="rl-mono mt-1 break-all text-sm">{wallet.address ?? "Browsing read-only"}</div>
           <div className="mt-4 grid gap-2">

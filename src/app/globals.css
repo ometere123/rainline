@@ -124,6 +124,15 @@ a {
   border-radius: 0 0 3px 3px;
 }
 
+/* Overlay panels (the wallet dropdown) that also want the station look. These
+   classes live after Tailwind's import, so `.rl-station { position: relative }`
+   outranks the `absolute` utility on equal specificity and would drop the panel
+   back into normal flow, pushing the whole header down. Declared after
+   .rl-station so it wins for elements carrying both. */
+.rl-popover {
+  position: absolute;
+}
+
 .rl-gauge {
   border: 1px dashed hsl(var(--border));
   border-radius: 0.25rem;
