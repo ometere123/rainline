@@ -3,6 +3,27 @@
 Parametric micro-insurance for small farms and outdoor businesses, settled by GenLayer consensus
 instead of a single insurer's weather feed.
 
+## Reviewer summary
+
+Rainline is a complete GenLayer parametric insurance app. Users buy weather cover for a specific
+location, peril, threshold, payout amount, and future coverage window. After the window closes,
+anyone can trigger a claim check. The Intelligent Contract fetches real weather evidence from
+independent public sources, asks GenLayer validators to reconcile the evidence, and pays eligible
+claims from a shared GEN pool called the Cistern.
+
+GenLayer is central to the product because the hard part is not ordinary form submission or a
+better AI answer. Weather sources can disagree materially across grid models, satellite products,
+and local reports. Rainline uses validator consensus to decide whether the fetched evidence
+supports a claim, whether it should be declined, or whether the contract should abstain with
+`INSUFFICIENT_EVIDENCE` instead of guessing.
+
+- **Live app**: add deployment URL here when published
+- **Source**: add GitHub repo URL here when published
+- **Contract**: `0x109b867c1d4757976afA66e180bd1a6dA890634C`
+- **Main workflow**: buy future weather cover -> wait for coverage window to end -> trigger
+  `check_claim` -> validators fetch and reconcile public evidence -> contract records verdict and
+  pays qualifying claims.
+
 A policyholder buys cover against one peril (rain/flood, extreme heat, wind, or air quality) at
 one location, for one coverage window, paying a premium in native GEN into a shared pool (called
 "the Cistern" in the UI). After coverage ends, **anyone** can permissionlessly trigger
