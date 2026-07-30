@@ -2,11 +2,17 @@ from conftest import warp_to
 
 GEN = 10**18
 
-COVERAGE_START = "2026-06-01T00:00:00Z"
-COVERAGE_END = "2026-06-10T00:00:00Z"
-AFTER_END = "2026-06-10T00:00:01Z"
-AFTER_COOLDOWN = "2026-06-10T00:31:00Z"
-JUST_BEFORE_COOLDOWN = "2026-06-10T00:29:59Z"
+COVERAGE_START = "2099-06-01T00:00:00Z"
+COVERAGE_END = "2099-06-10T00:00:00Z"
+AFTER_END = "2099-06-10T00:00:01Z"
+AFTER_COOLDOWN = "2099-06-10T00:31:00Z"
+JUST_BEFORE_COOLDOWN = "2099-06-10T00:29:59Z"
+
+# A second window that is still in the future after the clock has been warped past
+# COVERAGE_END, for tests that buy another policy once the first one has resolved.
+# buy_policy refuses retroactive cover, so a post-warp purchase needs a later window.
+LATER_START = "2099-08-01T00:00:00Z"
+LATER_END = "2099-08-10T00:00:00Z"
 
 
 def buy_policy(
@@ -93,6 +99,65 @@ def test_buy_policy_rejects_short_threshold(contract, direct_vm, direct_alice):
         contract.buy_policy("RAIN", "Farm", "1", "1", "short", COVERAGE_START, COVERAGE_END, 1 * GEN)
 
 
+def test_buy_policy_rejects_retroactive_coverage(contract, direct_vm, direct_alice):
+    """Insuring a window that has already elapsed is guaranteed adverse selection."""
+    warp_to(direct_vm, "2099-07-01T00:00:00Z")  # clock is now past COVERAGE_END
+    direct_vm.sender = direct_alice
+    direct_vm.value = 10 * GEN
+    with direct_vm.expect_revert("retroactive cover"):
+        contract.buy_policy("RAIN", "Farm", "1", "1", "x" * 20, COVERAGE_START, COVERAGE_END, 1 * GEN)
+    direct_vm.value = 0
+
+
+def test_buy_policy_rejects_coverage_starting_exactly_now(contract, direct_vm, direct_alice):
+    """Boundary: coverage_start == now is not in the future, so it must be refused."""
+    now = "2099-05-01T00:00:00Z"
+    warp_to(direct_vm, now)
+    direct_vm.sender = direct_alice
+    direct_vm.value = 10 * GEN
+    with direct_vm.expect_revert("retroactive cover"):
+        contract.buy_policy("RAIN", "Farm", "1", "1", "x" * 20, now, COVERAGE_END, 1 * GEN)
+    direct_vm.value = 0
+
+
+def test_buy_policy_accepts_coverage_starting_one_second_after_now(contract, direct_vm, direct_alice):
+    """The other side of the same boundary: one second into the future is allowed."""
+    warp_to(direct_vm, "2099-05-01T00:00:00Z")
+    pid = buy_policy(
+        contract, direct_vm, direct_alice,
+        start="2099-05-01T00:00:01Z", end=COVERAGE_END,
+    )
+    assert contract.get_policy(pid)["coverage_start"] == "2099-05-01T00:00:01Z"
+
+
+def test_buy_policy_rejects_non_iso_coverage_start(contract, direct_vm, direct_alice):
+    """Malformed timestamps must be rejected, since the gate is a string comparison.
+
+    This value sorts below COVERAGE_END so it clears the ordering check and actually
+    reaches the format check. A garbage value that sorts *above* a real timestamp
+    (e.g. "zzzz...") is already caught one step earlier by the coverage-ordering check,
+    so the two checks together leave no lexicographic way around the gate.
+    """
+    direct_vm.sender = direct_alice
+    direct_vm.value = 10 * GEN
+    with direct_vm.expect_revert("ISO-8601"):
+        contract.buy_policy(
+            "RAIN", "Farm", "1", "1", "x" * 20, "00000000000000000000", COVERAGE_END, 1 * GEN
+        )
+    direct_vm.value = 0
+
+
+def test_buy_policy_rejects_high_sorting_garbage_coverage_start(contract, direct_vm, direct_alice):
+    """The bypass attempt itself: a string that outranks every real timestamp."""
+    direct_vm.sender = direct_alice
+    direct_vm.value = 10 * GEN
+    with direct_vm.expect_revert("Coverage end must be after coverage start"):
+        contract.buy_policy(
+            "RAIN", "Farm", "1", "1", "x" * 20, "zzzzzzzzzzzzzzzzzzzzzz", COVERAGE_END, 1 * GEN
+        )
+    direct_vm.value = 0
+
+
 def test_buy_policy_records_premium_in_pool(contract, direct_vm, direct_alice):
     buy_policy(contract, direct_vm, direct_alice, premium=3 * GEN, payout=GEN // 2)
     assert contract.get_summary()["pool_balance"] == str(3 * GEN)
@@ -121,7 +186,7 @@ def test_list_policies_by_holder_filters(contract, direct_vm, direct_alice, dire
 
 def test_check_claim_before_coverage_ends_reverts(contract, direct_vm, direct_alice):
     pid = buy_policy(contract, direct_vm, direct_alice)
-    warp_to(direct_vm, "2026-06-05T00:00:00Z")
+    warp_to(direct_vm, "2099-06-05T00:00:00Z")
     direct_vm.sender = direct_alice
     with direct_vm.expect_revert("not ended"):
         contract.check_claim(pid)
@@ -139,7 +204,7 @@ def test_check_claim_at_exact_end_time_succeeds(contract, direct_vm, direct_alic
 
 def test_check_claim_one_second_before_end_reverts(contract, direct_vm, direct_alice):
     pid = buy_policy(contract, direct_vm, direct_alice)
-    warp_to(direct_vm, "2026-06-09T23:59:59Z")
+    warp_to(direct_vm, "2099-06-09T23:59:59Z")
     direct_vm.sender = direct_alice
     with direct_vm.expect_revert("not ended"):
         contract.check_claim(pid)
@@ -227,7 +292,10 @@ def test_buy_policy_accepts_payout_at_exactly_ten_times_premium(contract, direct
     direct_vm.sender = direct_alice
     contract.check_claim(seed_pid)  # DECLINED: releases liability, pool_balance stays 100 GEN
 
-    pid = buy_policy(contract, direct_vm, direct_alice, premium=1 * GEN, payout=10 * GEN)
+    pid = buy_policy(
+        contract, direct_vm, direct_alice, premium=1 * GEN, payout=10 * GEN,
+        start=LATER_START, end=LATER_END,
+    )
     assert contract.get_policy(pid)["payout_amount"] == str(10 * GEN)
 
 
@@ -242,7 +310,7 @@ def test_buy_policy_rejects_payout_one_wei_over_ten_times_premium(contract, dire
     direct_vm.value = 1 * GEN
     with direct_vm.expect_revert("10x the premium"):
         contract.buy_policy(
-            "RAIN", "Farm", "1", "1", "x" * 20, COVERAGE_START, COVERAGE_END, 10 * GEN + 1
+            "RAIN", "Farm", "1", "1", "x" * 20, LATER_START, LATER_END, 10 * GEN + 1
         )
     direct_vm.value = 0
 
@@ -318,7 +386,10 @@ def test_declined_policy_frees_liability_for_new_policies(contract, direct_vm, d
 
     # liability is released now, but the concentration cap (gate 2) is still computed off the
     # pool balance, not liability, so this only demonstrates the pool remains buyable.
-    second = buy_policy(contract, direct_vm, direct_alice, premium=1 * GEN, payout=2 * GEN)
+    second = buy_policy(
+        contract, direct_vm, direct_alice, premium=1 * GEN, payout=2 * GEN,
+        start=LATER_START, end=LATER_END,
+    )
     assert contract.get_policy(second)["payout_amount"] == str(2 * GEN)
 
 
@@ -395,7 +466,7 @@ def test_check_claim_abstains_when_numeric_sources_conflict_without_corroboratio
     direct_vm.clear_mocks()
     direct_vm.mock_web(
         r".*archive-api\.open-meteo\.com.*",
-        {"status": 200, "body": '{"daily":{"time":["2026-06-05"],"precipitation_sum":[105.0]}}'},
+        {"status": 200, "body": '{"daily":{"time":["2099-06-05"],"precipitation_sum":[105.0]}}'},
     )
     direct_vm.mock_web(
         r".*power\.larc\.nasa\.gov.*",
@@ -428,7 +499,7 @@ def test_check_claim_pays_out_when_both_numeric_sources_agree_severe(
     direct_vm.clear_mocks()
     direct_vm.mock_web(
         r".*archive-api\.open-meteo\.com.*",
-        {"status": 200, "body": '{"daily":{"time":["2026-06-05"],"precipitation_sum":[142.0]}}'},
+        {"status": 200, "body": '{"daily":{"time":["2099-06-05"],"precipitation_sum":[142.0]}}'},
     )
     direct_vm.mock_web(
         r".*power\.larc\.nasa\.gov.*",

@@ -36,6 +36,58 @@ function toIso(local: string) {
   return `${withSeconds}Z`;
 }
 
+// Buying cover is the one payable write, and a payable write that reverts does NOT return
+// the premium: the value moves to the contract before the method body runs, and the revert
+// rolls back the state without refunding. Every [EXPECTED] condition the contract enforces
+// is therefore checked here first, so a user error costs nothing instead of stranding GEN.
+// Verified on-chain: tx 0x6b23e134...9e6f5 reverted on the retroactive-cover guard and left
+// 100 GEN sitting in the contract with no policy created.
+const MIN_LEAD_MS = 2 * 60 * 1000; // the contract compares against its own tx timestamp, minutes old
+
+function preflightError(state: {
+  location: string;
+  latitude: string;
+  longitude: string;
+  threshold: string;
+  start: string;
+  end: string;
+  premium: string;
+  payout: string;
+}): string | null {
+  const start = new Date(toIso(state.start));
+  const end = new Date(toIso(state.end));
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return "Enter a valid coverage start and end.";
+  }
+  if (end <= start) {
+    return "Coverage end must be after coverage start.";
+  }
+  if (start.getTime() <= Date.now() + MIN_LEAD_MS) {
+    return "Coverage must start at least a few minutes from now. Rainline does not write retroactive cover, and the contract compares against its own transaction timestamp, so a start time that is nearly now will be rejected.";
+  }
+  if (state.location.trim().length < 2) return "Enter a location for the insured field or site.";
+  if (state.threshold.trim().length < 8) return "Describe the threshold in a full sentence.";
+  if (!state.latitude.trim() || !state.longitude.trim()) {
+    return "Latitude and longitude are required so the contract can fetch weather data for the exact spot.";
+  }
+
+  let premium: bigint;
+  let payout: bigint;
+  try {
+    premium = parseGen(state.premium);
+    payout = parseGen(state.payout);
+  } catch {
+    return "Enter valid GEN amounts for the premium and payout.";
+  }
+  if (premium <= 0n) return "The premium must be greater than zero.";
+  if (payout <= 0n) return "The payout must be greater than zero.";
+  if (payout > premium * 10n) {
+    return "The payout cannot exceed 10x the premium. Raise the premium or lower the payout.";
+  }
+  return null;
+}
+
 function writeErrorMessage(error: unknown, fallback: string) {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("Failed to fetch Version") || message.includes("unknown RPC error")) {
@@ -71,6 +123,14 @@ export function BuyPolicyForm() {
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError("");
+
+    // Catch user error before any GEN leaves the wallet -- see preflightError above.
+    const problem = preflightError(state);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+
     setBusy(true);
     try {
       const client = await wallet.getWriteClient();

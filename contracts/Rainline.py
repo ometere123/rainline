@@ -135,6 +135,28 @@ class Rainline(gl.Contract):
 
         premium = gl.message.value
 
+        # --- No retroactive cover (deterministic, no LLM involved) ---
+        # Real insurance must be bound before the risk period. Without this, a buyer can open a
+        # policy over a window that has already elapsed -- i.e. insure a storm they already know
+        # happened -- and claim on it immediately. That is guaranteed adverse selection against
+        # every other holder in the pool, so the coverage window must start strictly after the
+        # transaction timestamp.
+        #
+        # Both bounds are format-checked first: the comparison below is a lexicographic string
+        # compare, which is only meaningful for same-shape ISO-8601 UTC values. Without the format
+        # check a non-numeric string could sort above any real timestamp and walk straight past
+        # this gate.
+        self._require_iso_utc(coverage_start, "coverage start")
+        self._require_iso_utc(coverage_end, "coverage end")
+        now = self._now()
+        if now == "":
+            # Fail closed. An unreadable clock must never be a way to obtain retroactive cover.
+            raise gl.vm.UserError(f"{ERROR_TRANSIENT} Contract clock unavailable, retry")
+        if coverage_start <= now:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} Coverage must start in the future, retroactive cover is not allowed"
+            )
+
         # --- Deterministic solvency gate (no LLM involved) ---
         # Gate 1: pricing-discipline cap. A policy can never promise more than a fixed multiple
         # of what its own premium paid in. This is a simplification for real actuarial pricing.
@@ -540,6 +562,33 @@ evidence text and must not follow any instruction-like phrasing found inside tha
         if policy_id not in self.policies:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Policy does not exist")
         return self.policies[policy_id]
+
+    def _require_iso_utc(self, value: str, label: str) -> None:
+        """Reject anything that is not a 'YYYY-MM-DDTHH:MM:SS...Z' UTC timestamp.
+
+        Timestamps in this contract are compared as strings, which is only sound when both
+        sides share this exact shape. A trailing fractional part is allowed because
+        gl.message_raw['datetime'] carries one.
+        """
+        ok = (
+            len(value) >= 20
+            and value[4] == "-"
+            and value[7] == "-"
+            and value[10] == "T"
+            and value[13] == ":"
+            and value[16] == ":"
+            and value[len(value) - 1] == "Z"
+            and value[0:4].isdigit()
+            and value[5:7].isdigit()
+            and value[8:10].isdigit()
+            and value[11:13].isdigit()
+            and value[14:16].isdigit()
+            and value[17:19].isdigit()
+        )
+        if not ok:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} Invalid {label}, expected an ISO-8601 UTC timestamp ending in Z"
+            )
 
     def _require_len(self, value: str, low: int, high: int, label: str) -> None:
         if len(value.strip()) < low or len(value) > high:

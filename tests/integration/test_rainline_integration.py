@@ -19,15 +19,27 @@ which returns the transaction receipt. To send from a specific account,
 """
 
 import time
+from datetime import datetime, timedelta, timezone
 
 from gltest import get_contract_factory, get_accounts
 from gltest.assertions import tx_execution_succeeded, tx_execution_failed
 
 GEN = 10**18
 
-COVERAGE_START = "2026-01-01T00:00:00Z"
-COVERAGE_END = "2026-01-01T00:00:05Z"  # short window so the integration run doesn't need to wait long
 
+def _window(start_in: int = 20, length: int = 10):
+    """A short coverage window starting shortly in the future.
+
+    `buy_policy` refuses retroactive cover, so the window cannot be hardcoded to a past
+    date. The lead time absorbs the gap between building the args here and the contract
+    reading its own transaction timestamp; the window is kept short so a test that has to
+    wait for it to elapse does not add much to the run.
+    """
+    now = datetime.now(timezone.utc)
+    start = now + timedelta(seconds=start_in)
+    end = start + timedelta(seconds=length)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return start.strftime(fmt), end.strftime(fmt)
 
 def _deploy():
     factory = get_contract_factory("Rainline")
@@ -47,6 +59,7 @@ def test_buy_policy_on_chain():
     accounts = get_accounts()
     holder = accounts[0]
     as_holder = contract.connect(holder)
+    coverage_start, coverage_end = _window()
 
     receipt = as_holder.buy_policy(
         args=[
@@ -55,8 +68,8 @@ def test_buy_policy_on_chain():
             "-1.29",
             "36.82",
             "More than 80mm of rain in a 24h window during coverage counts as a qualifying loss.",
-            COVERAGE_START,
-            COVERAGE_END,
+            coverage_start,
+            coverage_end,
             2 * GEN,
         ],
     ).transact(value=10 * GEN)
@@ -77,6 +90,7 @@ def test_buy_policy_rejects_zero_value():
     accounts = get_accounts()
     holder = accounts[0]
     as_holder = contract.connect(holder)
+    coverage_start, coverage_end = _window()
 
     receipt = as_holder.buy_policy(
         args=[
@@ -85,8 +99,8 @@ def test_buy_policy_rejects_zero_value():
             "-1.29",
             "36.82",
             "More than 80mm of rain in a 24h window counts as a qualifying loss.",
-            COVERAGE_START,
-            COVERAGE_END,
+            coverage_start,
+            coverage_end,
             5 * GEN,
         ],
     ).transact(value=0)
@@ -101,6 +115,7 @@ def test_buy_policy_rejects_payout_exceeding_solvency_gate():
     accounts = get_accounts()
     holder = accounts[0]
     as_holder = contract.connect(holder)
+    coverage_start, coverage_end = _window()
 
     receipt = as_holder.buy_policy(
         args=[
@@ -109,8 +124,8 @@ def test_buy_policy_rejects_payout_exceeding_solvency_gate():
             "-1.29",
             "36.82",
             "More than 80mm of rain in a 24h window counts as a qualifying loss.",
-            COVERAGE_START,
-            COVERAGE_END,
+            coverage_start,
+            coverage_end,
             50 * GEN,  # 5x the 10 GEN premium's concentration cap of 2 GEN
         ],
     ).transact(value=10 * GEN)
@@ -165,6 +180,8 @@ def test_check_claim_runs_live_consensus_after_coverage_ends():
     accounts = get_accounts()
     holder = accounts[0]
     as_holder = contract.connect(holder)
+    # Long enough to survive the buy transaction settling before the window closes.
+    coverage_start, coverage_end = _window(start_in=25, length=10)
 
     as_holder.buy_policy(
         args=[
@@ -173,14 +190,14 @@ def test_check_claim_runs_live_consensus_after_coverage_ends():
             "-1.29",
             "36.82",
             "More than 80mm of rain in a 24h window counts as a qualifying loss.",
-            COVERAGE_START,
-            COVERAGE_END,
+            coverage_start,
+            coverage_end,
             2 * GEN,
         ],
     ).transact(value=10 * GEN)
     policy_id = contract.list_policies(args=[0, 10]).call()[0]["id"]
 
-    time.sleep(10)  # let the short coverage window fully elapse on-chain
+    time.sleep(45)  # let the short coverage window fully elapse on-chain
 
     _retryable(lambda: as_holder.check_claim(args=[policy_id]).transact(
         wait_interval=10000, wait_retries=90,
