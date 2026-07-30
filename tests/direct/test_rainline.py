@@ -32,9 +32,21 @@ def buy_policy(
 
 def mock_claim(direct_vm, verdict="NONE", reason="No qualifying loss detected."):
     direct_vm.clear_mocks()
-    direct_vm.mock_web(r".*historical\+weather\+observations.*", {"status": 200, "body": "station readings for the window: light rain, 12mm total"})
-    direct_vm.mock_web(r".*satellite\+OR\+reanalysis.*", {"status": 200, "body": "satellite summary: below-normal precipitation over the region"})
-    direct_vm.mock_web(r".*news\+OR\+community\+report.*", {"status": 200, "body": "no local reports of flooding found"})
+    # Mocks match the real evidence endpoints the contract now calls: Open-Meteo's ERA5
+    # archive, NASA POWER, and a local-report search. Bodies mimic the actual JSON shape
+    # each API returns so the prompt sees realistically-shaped evidence.
+    direct_vm.mock_web(
+        r".*archive-api\.open-meteo\.com.*",
+        {"status": 200, "body": '{"daily":{"time":["2026-01-02"],"precipitation_sum":[12.0]}}'},
+    )
+    direct_vm.mock_web(
+        r".*power\.larc\.nasa\.gov.*",
+        {"status": 200, "body": '{"properties":{"parameter":{"PRECTOTCORR":{"20260102":9.4}}}}'},
+    )
+    direct_vm.mock_web(
+        r".*wikipedia.org.*",
+        {"status": 200, "body": "no local reports of flooding found"},
+    )
     direct_vm.mock_llm(
         r".*claims adjuster.*",
         f'{{"verdict":"{verdict}","station_summary":"12mm recorded","satellite_summary":"below normal","report_summary":"none found","rationale":"{reason}"}}',
@@ -360,14 +372,80 @@ def test_recheck_after_cooldown_succeeds_and_can_resolve(contract, direct_vm, di
 def test_check_claim_clamps_unrecognized_verdict_to_insufficient(contract, direct_vm, direct_alice):
     pid = buy_policy(contract, direct_vm, direct_alice)
     warp_to(direct_vm, AFTER_END)
-    direct_vm.mock_web(r".*historical\+weather\+observations.*", {"status": 200, "body": "x"})
-    direct_vm.mock_web(r".*satellite\+OR\+reanalysis.*", {"status": 200, "body": "x"})
-    direct_vm.mock_web(r".*news\+OR\+community\+report.*", {"status": 200, "body": "x"})
+    direct_vm.mock_web(r".*archive-api\.open-meteo\.com.*", {"status": 200, "body": "x"})
+    direct_vm.mock_web(r".*power\.larc\.nasa\.gov.*", {"status": 200, "body": "x"})
+    direct_vm.mock_web(r".*wikipedia.org.*", {"status": 200, "body": "x"})
     direct_vm.mock_llm(r".*claims adjuster.*", '{"verdict":"MAYBE","station_summary":"","satellite_summary":"","report_summary":"","rationale":""}')
     direct_vm.sender = direct_alice
     contract.check_claim(pid)
     assert contract.get_policy(pid)["status"] == "CHECKING"
     assert contract.get_policy(pid)["verdict"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_check_claim_abstains_when_numeric_sources_conflict_without_corroboration(
+    contract, direct_vm, direct_alice
+):
+    """Basis risk: ERA5 and NASA POWER disagree sharply and no local report backs either.
+
+    This is the case the two-numeric-source design exists to catch. The contract must not
+    pick a side or average them; it must abstain and stay claimable.
+    """
+    pid = buy_policy(contract, direct_vm, direct_alice)
+    warp_to(direct_vm, AFTER_END)
+    direct_vm.clear_mocks()
+    direct_vm.mock_web(
+        r".*archive-api\.open-meteo\.com.*",
+        {"status": 200, "body": '{"daily":{"time":["2026-06-05"],"precipitation_sum":[105.0]}}'},
+    )
+    direct_vm.mock_web(
+        r".*power\.larc\.nasa\.gov.*",
+        {"status": 200, "body": '{"properties":{"parameter":{"PRECTOTCORR":{"20260605":21.9}}}}'},
+    )
+    direct_vm.mock_web(r".*wikipedia.org.*", {"status": 200, "body": "no results found"})
+    direct_vm.mock_llm(
+        r".*claims adjuster.*",
+        '{"verdict":"INSUFFICIENT_EVIDENCE","station_summary":"ERA5 105.0 mm",'
+        '"satellite_summary":"NASA POWER 21.9 mm","report_summary":"none found",'
+        '"rationale":"Sources differ by ~5x with no corroborating local report."}',
+    )
+    direct_vm.sender = direct_alice
+    contract.check_claim(pid)
+    policy = contract.get_policy(pid)
+    assert policy["verdict"] == "INSUFFICIENT_EVIDENCE"
+    # Abstention must leave the ticket claimable, not deny it.
+    assert policy["status"] == "CHECKING"
+
+
+def test_check_claim_pays_out_when_both_numeric_sources_agree_severe(
+    contract, direct_vm, direct_alice
+):
+    """Both real APIs agree on a large exceedance, corroborated locally: payout must fire.
+
+    Payout is sized to satisfy the solvency gates (<=10x premium, <=1/5 of the pool).
+    """
+    pid = buy_policy(contract, direct_vm, direct_alice, premium=10 * GEN, payout=2 * GEN)
+    warp_to(direct_vm, AFTER_END)
+    direct_vm.clear_mocks()
+    direct_vm.mock_web(
+        r".*archive-api\.open-meteo\.com.*",
+        {"status": 200, "body": '{"daily":{"time":["2026-06-05"],"precipitation_sum":[142.0]}}'},
+    )
+    direct_vm.mock_web(
+        r".*power\.larc\.nasa\.gov.*",
+        {"status": 200, "body": '{"properties":{"parameter":{"PRECTOTCORR":{"20260605":128.4}}}}'},
+    )
+    direct_vm.mock_web(
+        r".*wikipedia.org.*",
+        {"status": 200, "body": "Severe flooding reported across the district, crops destroyed"},
+    )
+    direct_vm.mock_llm(
+        r".*claims adjuster.*",
+        '{"verdict":"SEVERE","station_summary":"ERA5 142.0 mm","satellite_summary":"NASA POWER 128.4 mm",'
+        '"report_summary":"severe flooding reported","rationale":"Both sources far exceed threshold and local reports corroborate."}',
+    )
+    direct_vm.sender = direct_alice
+    contract.check_claim(pid)
+    assert contract.get_policy(pid)["status"] == "PAID_OUT"
 
 
 def test_check_claim_rejects_paid_out_policy(contract, direct_vm, direct_alice):
