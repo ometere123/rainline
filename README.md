@@ -6,11 +6,21 @@ instead of a single insurer's weather feed.
 A policyholder buys cover against one peril (rain/flood, extreme heat, wind, or air quality) at
 one location, for one coverage window, paying a premium in native GEN into a shared pool (called
 "the Cistern" in the UI). After coverage ends, **anyone** can permissionlessly trigger
-`check_claim`. The Intelligent Contract fetches weather-station data, a satellite/precipitation-
-style summary, and local news/community reports for that exact location and window, then asks
-GenLayer validators to reconcile all three into a banded severity verdict (NONE / MINOR /
-MODERATE / SEVERE / INSUFFICIENT_EVIDENCE). MODERATE and SEVERE pay out automatically from the
-pool.
+`check_claim`. The Intelligent Contract then fetches, from inside consensus, two independent real
+meteorological APIs (ECMWF ERA5 reanalysis via Open-Meteo, and NASA POWER satellite-derived data)
+plus a corroborating report search, and asks GenLayer validators to reconcile all three into a
+banded severity verdict (NONE / MINOR / MODERATE / SEVERE / INSUFFICIENT_EVIDENCE). MODERATE and
+SEVERE pay out automatically from the pool.
+
+The two numeric sources sit on different models at different grid resolutions and **routinely
+disagree** — on the day the 2024 Valencia flood killed over 200 people, ERA5 recorded 105 mm and
+NASA POWER recorded 21.9 mm for the same coordinates. Deciding which reading reflects what
+actually happened on one insured field is a judgement call, not a formula, and it is the reason
+this contract needs consensus rather than an oracle.
+
+**Proven on-chain**: a real policy over Hurricane Harvey (Houston, 26–29 Aug 2017) reached a
+`SEVERE` verdict and paid out, moving the pool from 100 GEN to 80 GEN. Transaction hashes and the
+verbatim evidence the validators stored are in [Real on-chain proof](#real-on-chain-proof-not-simulated).
 
 ## Problem and counterfactual
 
@@ -65,28 +75,51 @@ holds.
 
 ## Evidence fetches: what they can and cannot find
 
-`check_claim`'s leader function performs three `gl.nondet.web.render` calls (station-style,
-satellite/reanalysis-style, and local-report-style search queries) plus one `gl.nondet.exec_prompt`
-reconciliation. These are **generic web-search fetches, not real meteorological API
-integrations** — there is no NOAA/Copernicus/IQAir client library involved. The queries were
-tightened to ask for named, citable sources for the exact coordinates and date range (station
-IDs, `site:noaa.gov`/`site:wunderground.com`/`site:meteostat.net` for station data,
-`site:nasa.gov`/`site:copernicus.eu`/`site:iqair.com`/`site:airnow.gov` for satellite/reanalysis
-data) rather than a generic "describe the weather" search, and the LLM prompt explicitly tells
-the model to weigh a named, specific source more heavily than a vague one.
+`check_claim`'s leader function performs three `gl.nondet.web.render` calls plus one
+`gl.nondet.exec_prompt` reconciliation. Two of the three legs are **direct calls to real, keyless
+meteorological APIs** that return machine-readable numeric observations for the exact insured
+coordinates and date range:
 
-In practice, on StudioNet's infrastructure, these Google-search-based fetches are frequently
-blocked by bot-detection (HTTP 429 with a CAPTCHA page) rather than returning real results — this
-was observed directly in on-chain testing below, not assumed. Before this pass, a blocked fetch
-raised an uncaught `NondetException` that aborted the whole leader execution with an
-`execution_result: ERROR`, which is a worse outcome than a clean `INSUFFICIENT_EVIDENCE`: the
-consensus round burns without ever reaching a resolvable state. Each fetch is now wrapped
-(`_safe_render`) so a hard failure degrades that one source to the literal string
-`[FETCH_UNAVAILABLE]` instead of raising, and the prompt is told to treat that string as missing
-evidence, not as evidence of a calm period. **`INSUFFICIENT_EVIDENCE` should be read as the
-expected common-case outcome for sparse/rural coordinates and for any fetch that trips
-bot-detection, not a rare edge case** — the real, on-chain `check_claim` run below hit exactly
-this path and resolved cleanly to `INSUFFICIENT_EVIDENCE` instead of erroring.
+| Leg | Source | What it is |
+|---|---|---|
+| A | `archive-api.open-meteo.com` (or `air-quality-api` for the AIR peril) | ECMWF **ERA5 / ERA5-Land** reanalysis, ~9–31km grid |
+| B | `power.larc.nasa.gov` | NASA **MERRA-2 / SYN1DEG** satellite-derived, ~50km grid |
+| C | `en.wikipedia.org/w/api.php` | Wikipedia search API — qualitative ground-truth corroboration |
+
+A and B are deliberately **independent providers on different underlying models and grid
+resolutions, so they can and do disagree.** That disagreement is the whole reason this contract
+needs consensus judgement rather than a single oracle feed. It is *basis risk*: the documented
+central weakness of parametric insurance, where a coarse grid cell smooths away a real localised
+event, or spreads a nearby event across a field that was never affected. Two concrete measured
+examples, both independently reproducible with `curl`:
+
+- Valencia, Spain, 2024-10-29 (catastrophic flood): **ERA5 105.0 mm** vs **NASA POWER 21.9 mm** —
+  a ~5x disagreement on a day that killed over 200 people. A contract wired to NASA POWER alone
+  would have declined that claim.
+- Houston, Texas, 2017-08-27 (Hurricane Harvey): **ERA5 143.0 mm** vs **NASA POWER 237.3 mm** —
+  both far above any sane threshold, so the direction is unambiguous even though the magnitudes
+  differ by ~65%.
+
+The prompt tells the model exactly how to weigh this: if A and B broadly agree, band the severity
+confidently; if they disagree materially, use leg C to break the tie; if they disagree materially
+**and** C is empty or off-location, return `INSUFFICIENT_EVIDENCE` rather than picking a side.
+It is explicitly told not to average the two numbers.
+
+Leg C uses Wikipedia's API rather than a search engine on purpose. An earlier version of this
+contract used Google (and then DuckDuckGo) for all three legs; **StudioNet's validator fetches are
+served bot-detection pages by general search engines**, which was observed directly on-chain, not
+assumed — the first real `check_claim` run on this contract returned
+`"No local reports found (SOURCE C unavailable)"` with DuckDuckGo. Wikipedia's API is keyless,
+machine-readable, and answers reliably; it surfaces named, dated articles for significant weather
+and legitimately returns little for a minor local event, which correctly pushes borderline cases
+toward abstention instead of a fabricated corroboration.
+
+Every fetch is wrapped (`_safe_render`) so a hard failure degrades that one source to the literal
+string `[FETCH_UNAVAILABLE]` rather than raising. Before this guard, a blocked fetch raised an
+uncaught `NondetException` that aborted the whole leader with `execution_result: ERROR` — worse
+than a clean abstention, because the consensus round burns without reaching a resolvable state.
+The prompt treats `[FETCH_UNAVAILABLE]` as missing evidence, never as evidence of a calm period,
+and mandates `INSUFFICIENT_EVIDENCE` if both numeric legs are unavailable.
 
 ## Architecture
 
@@ -118,48 +151,65 @@ LEADER_TIMEOUT are surfaced as retryable states rather than hard errors
 
 ## Deployed contract (StudioNet)
 
-- **Address**: `0xabDEAe70481F171375c0e23Fd72d9CCc77afDDee`
-- **Explorer**: https://genlayer-explorer.vercel.app/address/0xabDEAe70481F171375c0e23Fd72d9CCc77afDDee
+- **Address**: `0x385049Cf21660863c06a18f5eaA77e6a8A3dA352`
+- **Explorer**: https://genlayer-explorer.vercel.app/address/0x385049Cf21660863c06a18f5eaA77e6a8A3dA352
+- **Deploy tx**: `0x436c33edc9f9669da4ae7116b5d3193637fb4a81d0cf8146bdc343a6570c92aa`
 
-This is the redeployment carrying the solvency-gate and fetch-hardening fix; every executable
-line in `contracts/Rainline.py` changed, so the previous address was retired. `.env.local`,
-`scripts/verify-schema.mjs`'s target, and this document all point at the address above.
+This is the redeployment carrying the solvency-gate fix and the real-meteorological-API evidence
+layer; every executable line in `contracts/Rainline.py` changed, so previous addresses were
+retired. `.env.local`, `scripts/verify-schema.mjs`'s target, and this document all point at the
+address above. Schema check: `node scripts/verify-schema.mjs` → `Schema verified for
+0x385049Cf21660863c06a18f5eaA77e6a8A3dA352.`
 
 ### Real on-chain proof (not simulated)
 
 The `genlayer` CLI's `write` command hardcodes `value: 0n`, so it cannot exercise `buy_policy` (a
 `@gl.public.write.payable` method). `scripts/onchain-verify.mjs` uses `genlayer-js` directly —
-`createClient`, `createAccount` from a decrypted local keystore, `writeContract` with a real
-non-zero `value: bigint`, `waitForTransactionReceipt` — to call `buy_policy` and `check_claim`
-with actual GEN against StudioNet, using a funded StudioNet test account (`genlayer account
-create` + `genlayer account send` from the funded `deployer` account).
+`createClient`, `createAccount`, `writeContract` with a real non-zero `value: bigint`,
+`waitForTransactionReceipt` — to call `buy_policy` and `check_claim` with actual GEN on StudioNet.
 
-- **`buy_policy` with real value**: tx
-  `0x05f68435fa6822948ca990f4d192624337af65fd5407ed9cf1676b443978bba0`, `FINALIZED`, premium
-  `10 GEN`, payout `2 GEN` — created policy `RLN-1`, holder `0xEE0f7E7Dd201Cdd37099F76e838b33D0431ef77d`.
-  `get_summary()` immediately after: `pool_balance = 10000000000000000000`,
-  `outstanding_liability = 2000000000000000000`, `policy_count = 1`.
-- **`check_claim` real consensus round**: tx
-  `0x2c535ce1f12f63cb9b28daf77cfbcf34f568380fc31f75c0ff25a9cb5e418dcb`, `FINALIZED`. All three
-  evidence fetches hit StudioNet's Google-search bot-detection block (HTTP 429) and degraded to
-  `[FETCH_UNAVAILABLE]` via `_safe_render`; the LLM correctly reasoned from the absence of
-  evidence and returned `INSUFFICIENT_EVIDENCE`, and the contract moved the policy to
-  `STATUS_CHECKING` (`check_attempts = 1`) rather than erroring out. This is genuine end-to-end
-  proof of both the payable write path and the consensus claim path — the honest, common-case
-  result for a real evidence-fetching round on this infra, not a payout, but a clean and correct
-  one.
-- **Schema check**: `node scripts/verify-schema.mjs` → `Schema verified for
-  0xabDEAe70481F171375c0e23Fd72d9CCc77afDDee.`
-- **Frontend read of the same state**: visiting `/policy/RLN-1` on a locally running `npm run
-  dev` instance shows the same holder, stake, payout, verdict, and evidence summaries read live
-  from the contract — see "Frontend verification" below.
+**All three write methods have been exercised on-chain.** The claim run below insures a real,
+independently verifiable historical event: Hurricane Harvey over Houston, 26–29 Aug 2017.
 
-An earlier deploy of the pre-fix contract (before this session) was also checked and superseded;
-see git history for the address progression. No payout (MODERATE/SEVERE) verdict was obtained in
-this session — StudioNet's evidence fetches hit bot-detection both times they were exercised
-live, which is exactly the honest, common-case outcome documented above, not a cherry-picked
-result. Re-running `node scripts/onchain-verify.mjs <keystore> <password> claim <policyId>` after
-the cooldown (`RECHECK_COOLDOWN_SECONDS = 1800`) will retry against the same policy.
+| Step | Tx | Result |
+|---|---|---|
+| `buy_policy` (payable, **100 GEN** premium, 20 GEN payout) | `0x3033bc9f2b92f495b38e211777b434a6a881285a26ebf3d1b19d4703ed03d89b` | `FINALIZED` — created `RLN-1`; `pool_balance` 100 GEN, `outstanding_liability` 20 GEN |
+| `check_claim` (consensus round, 3 real fetches + 1 reconciliation) | `0xe63f20f2a4d47d63f11076e3868b91ee9c5309f5ea275bc51283dc6aa530f4bb` | `FINALIZED` — verdict **`SEVERE`**, policy **`PAID_OUT`** |
+| `expire_unclaimed` (permissionless sweep of `RLN-2`) | ACCEPTED, 5/5 validators AGREE | `EXPIRED_NO_CLAIM`, liability released 5 GEN → 0 |
+
+**The payout actually moved value.** `get_summary()` before the claim: `pool_balance =
+100000000000000000000`, `outstanding_liability = 20000000000000000000`. After: `pool_balance =
+80000000000000000000`, `outstanding_liability = 0`. Twenty GEN left the Cistern and the contingent
+liability was released, on-chain, driven purely by a consensus verdict.
+
+The evidence the validators actually stored on the policy (verbatim, truncated):
+
+> **`station_summary`** — "SOURCE A (Open-Meteo ERA5) daily precipitation_sum at the insured
+> coordinates was 85.10 mm on 2017-08-26, 143.00 mm on 2017-08-27, 63.00 mm on 2017-08-28, and
+> 203.90 mm on 2017-08-29."
+>
+> **`satellite_summary`** — "SOURCE B (NASA POWER) PRECTOTCORR was 164.31 mm/day on 2017-08-26,
+> 237.3 mm/day on 2017-08-27, 131.02 mm/day on 2017-08-28, and 32.22 mm/day on 2017-08-29."
+>
+> **`report_summary`** — "SOURCE C includes a dated, location-relevant result for Hurricane Harvey
+> stating catastrophic rainfall-triggered flooding in Greater Houston and Southeast Texas in 2017,
+> which corroborates extreme rainfall at or near the insured location during the coverage period."
+
+Those figures are independently reproducible — `curl` the two API URLs for the same coordinates and
+dates and you get the same numbers. This is the strongest evidence in the project that the contract
+is fetching real data rather than hallucinating it: the stored summaries match live API responses
+to the decimal.
+
+**A negative result, kept in.** The first deployment of this evidence layer
+(`0x148dCD4dfa124b10cb975c26aCE102F603fe5173`, buy tx
+`0xd6146782654b76f48dc5b2f088a0a0cd5d4d3e28b892ed225b9660acd39f7926`) used DuckDuckGo for leg C and
+returned `"No local reports found (SOURCE C unavailable)"` — the search engine served the validator
+a bot-detection page. It still reached `SEVERE`, because legs A and B agreed strongly enough that
+the tie-breaker was not needed, which is the fallback behaving correctly. That failure is what
+motivated the switch to Wikipedia's API; it is documented here rather than quietly redeployed away.
+
+An earlier pre-fix contract (`0xabDEAe70481F171375c0e23Fd72d9CCc77afDDee`) and a failed deploy
+attempt before it are superseded; see git history for the address progression.
 
 ## Tests
 
@@ -169,15 +219,29 @@ the cooldown (`RECHECK_COOLDOWN_SECONDS = 1800`) will retry against the same pol
 python -m pytest tests/direct/ -v
 ```
 
-Result: **41 passed** (34 original + 7 new covering the solvency gate). New coverage: payout
-accepted at exactly 10x premium and rejected one wei over, payout accepted at exactly the 20%
-pool-fraction cap and rejected one wei over, an adversarial multi-policy attack that stays inside
-the per-policy 20% cap on every purchase but is caught by the aggregate liability invariant, and
-liability release on both `DECLINED` and `EXPIRED_NO_CLAIM` transitions freeing capacity for
-later purchases. Existing coverage (input validation, the coverage-window gate on both sides of
-the boundary, all five severity bands, the `INSUFFICIENT_EVIDENCE` abstention path and its
-cooldown, permissionless triggering, unrecognized-verdict clamping, `expire_unclaimed` and its
-grace period, shared-pool payout, and the prompt-injection-attempt case) is unchanged.
+Result: **43 passed**. Coverage added for the solvency gate: payout accepted at exactly 10x premium
+and rejected one wei over, payout accepted at exactly the 20% pool-fraction cap and rejected one
+wei over, an adversarial multi-policy attack that stays inside the per-policy 20% cap on every
+purchase but is caught by the aggregate liability invariant, and liability release on both
+`DECLINED` and `EXPIRED_NO_CLAIM` transitions freeing capacity for later purchases.
+
+Two tests cover the two-numeric-source design specifically, with web mocks shaped like the real
+API responses:
+
+- `test_check_claim_abstains_when_numeric_sources_conflict_without_corroboration` — ERA5 reports
+  105.0 mm, NASA POWER reports 21.9 mm (the real Valencia numbers), leg C is empty. The contract
+  must abstain rather than pick a side or average, and must leave the ticket claimable.
+- `test_check_claim_pays_out_when_both_numeric_sources_agree_severe` — both numeric legs far
+  exceed the threshold and leg C corroborates, so the payout must fire.
+
+Existing coverage (input validation, the coverage-window gate on both sides of the boundary, all
+five severity bands, the `INSUFFICIENT_EVIDENCE` abstention path and its cooldown, permissionless
+triggering, unrecognized-verdict clamping, `expire_unclaimed` and its grace period, shared-pool
+payout, and the prompt-injection-attempt case) is unchanged.
+
+One of these tests caught a real bug in its own first draft: the payout test was written with a
+20 GEN payout against a 10 GEN premium and was correctly rejected on the spot by the concentration
+cap, which is the solvency gate doing exactly its job.
 
 ### Integration tests (`tests/integration/`, gltest against StudioNet)
 
@@ -194,20 +258,27 @@ receipt whose `consensus_data.leader_receipt[0].execution_result` is `"ERROR"`, 
 the real API and to respect the new solvency-gate premium/payout amounts, plus one new test
 (`test_buy_policy_rejects_payout_exceeding_solvency_gate`) exercising the on-chain revert.
 
-Result: **6 passed in 239.42s (0:03:59)** — deploy, a real payable `buy_policy`, a rejected
-zero-value call, a rejected over-cap `buy_policy`, a rejected pre-window `check_claim`, and a
-live `check_claim` consensus round that resolved to a valid severity band. Dominated by the one
-live consensus round (`test_check_claim_runs_live_consensus_after_coverage_ends`).
+Result: **6 passed in 246.04s (0:04:06)** against the current contract — deploy, a real payable
+`buy_policy`, a rejected zero-value call, a rejected over-cap `buy_policy`, a rejected pre-window
+`check_claim`, and a live `check_claim` consensus round that resolved to a valid severity band.
+Dominated by the one live consensus round
+(`test_check_claim_runs_live_consensus_after_coverage_ends`).
 
 ### Static checks
 
-`genvm-lint` is referenced in this project's task instructions but is not an installed or
-resolvable command in this environment (`genvm-lint: command not found`, and `npx genvm-lint`
-404s against the public npm registry) — it was not run, and no fabricated output is claimed for
-it here. `contracts/Rainline.py` was checked instead with `python -c "import ast;
-ast.parse(...)"` (clean) and by the fact that every direct and integration test above actually
-executes the deployed bytecode successfully, which exercises the same parse/type surface
-`genvm-lint` would.
+```
+PYTHONIOENCODING=utf-8 genvm-lint check contracts/Rainline.py --json
+```
+
+Result: `{"ok":true,"lint":{"ok":true,"passed":3},"validate":{"ok":true,"contract":"Rainline",
+"methods":7,"view_methods":4,"write_methods":3,"ctor_params":0}}` — clean, with one informational
+warning (`I200`) that a newer py-genlayer runner is available.
+
+Note for anyone reproducing this: `genvm-linter` installs a `genvm-lint.exe` shim into Python's
+`Scripts/` directory, which is not necessarily on `PATH`. An earlier pass through this project
+concluded the tool was unavailable and fell back to `ast.parse` — that conclusion was wrong; it
+was a `PATH` problem, not a missing package. Invoke it by absolute path if `genvm-lint` is not
+resolvable in your shell.
 
 ```
 npm run build   # next build -- compiles and type-checks clean
@@ -232,17 +303,15 @@ injected) is only required to open a ticket or trigger a claim check yourself.
 Run against a local `npm run dev` instance pointed at the redeployed contract:
 
 - **Generated (non-custodial, localStorage) wallet path**: connected via "Use browser wallet",
-  address displayed in the header (`0xF7dB...447A`), "Your Tickets" correctly shows the empty
-  state (`No tickets under this address yet`) since that generated address has not bought a
-  policy, and "Wallet Activity" correctly shows its own empty state.
-- **The Ledger** (`/policies`): lists the real on-chain policy `RLN-1` with correct staked (10
-  GEN) and payout (2 GEN) amounts read live from the contract, not a cached copy.
-- **Deep link** (`/policy/RLN-1`): shows the real holder address, coverage window, verdict
-  (`INSUFFICIENT_EVIDENCE`, displayed as "Logged as static"), all three evidence summaries
-  (correctly showing the `[FETCH_UNAVAILABLE]`-derived "No ... data available" text), the
-  rationale, and a working "Check claim now" retry action gated on the cooldown.
-  timestamps, staked/payout amounts, and copy voice ("The Ledger" / "Open a Ticket" / "Your
-  Tickets", no em dashes) are consistent with the redesign.
+  address displayed in the header, "Your Tickets" correctly shows the empty state (`No tickets
+  under this address yet`) since that generated address has not bought a policy, and "Wallet
+  Activity" correctly shows its own empty state.
+- **The Ledger** (`/policies`): lists the real on-chain policies read live from the contract, not
+  a cached copy.
+- **Deep link** (`/policy/RLN-1`): shows the real holder address, coverage window, the `SEVERE`
+  verdict, all three evidence summaries with the real ERA5 / NASA POWER figures, and the stored
+  rationale. Timestamps, staked/payout amounts, and copy voice ("The Ledger" / "Open a Ticket" /
+  "Your Tickets") are consistent with the redesign.
 - No console errors were observed on any of the pages above.
 - **Injected `window.ethereum` wallet path**: not verified in this session — the automated
   browser environment available here has no real wallet extension installed, so this path could
@@ -257,16 +326,26 @@ Run against a local `npm run dev` instance pointed at the redeployed contract:
 ## Honest limitations
 
 - **Solvency gate is a simplification, not actuarial pricing.** See "The solvency gate" above.
-  The 10x and 20% constants are fixed and auditable, not fitted to any loss model.
-- **Evidence fetches are generic web search, not real meteorological APIs**, and were observed in
-  this session to hit bot-detection on StudioNet's infra. `INSUFFICIENT_EVIDENCE` is the honest,
-  expected common case for this reason, documented rather than hidden. No MODERATE/SEVERE payout
-  verdict was obtained live in this session for that reason; the payable write path and the
-  consensus round both completed successfully and are proven above independent of which verdict
-  came back.
-- **`genvm-lint` was not run** — it is not an available command in this environment. See "Static
-  checks" above for what was actually run in its place.
+  The 10x and 20% constants are fixed and auditable, not fitted to any loss model. A production
+  insurer would price on peril, location, seasonality and historical loss data.
+- **Retroactive cover is not blocked.** `buy_policy` validates that `coverage_end > coverage_start`
+  but does not require `coverage_start` to be in the future, so a policy can be opened over a
+  window that has already elapsed. This is what made the Hurricane Harvey proof above possible,
+  and it is also a genuine adverse-selection hole: someone can insure a storm they already know
+  happened. A production version needs a `coverage_start > now` guard. It is called out here
+  rather than left for a reviewer to find.
+- **Grid resolution is a real limit on the evidence, even with real APIs.** ERA5 (~9–31km) and
+  NASA POWER (~50km) are both gridded products. Neither is a gauge sitting in the insured field,
+  so a sharply localised event can still be smoothed away by both. The three-source design
+  narrows basis risk; it does not eliminate it.
+- **`INSUFFICIENT_EVIDENCE` remains the expected outcome for genuinely ambiguous cases**, by
+  design. The abstention path is not a failure mode, and the contract will not be pushed into
+  guessing when the two numeric sources disagree without corroboration.
+- **StudioNet balances are simulated.** There is no EVM settlement layer, so while the payout above
+  demonstrably moved `pool_balance` from 100 GEN to 80 GEN and released the contingent liability
+  in contract state, that is not the same assurance as value settling on a production chain.
 - **The injected-wallet path was not walked end-to-end with a real browser extension.** See
-  "Frontend verification performed" above.
+  "Frontend verification performed" above. This is the one path still needing a human with a real
+  extension configured for StudioNet.
 - **No Vercel deployment and no demo video** — explicitly out of scope for this pass per the
   project owner's instructions.

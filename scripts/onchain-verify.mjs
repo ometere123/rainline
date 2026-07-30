@@ -6,16 +6,23 @@
 // StudioNet, wait for it to finalize, and print the resulting state so the outcome can be
 // recorded as real proof (not simulated) in the README.
 //
-// The signing key is decrypted in-process from a local V3 keystore file (created via
-// `genlayer account create` + `genlayer account export`) and is never written to stdout,
-// logs, or passed as a CLI argument.
+// Signing key resolution, in order:
+//   1. RAINLINE_PK env var (0x-prefixed hex private key)
+//   2. a local V3 keystore file (path + password as argv[2], argv[3])
+//   3. a freshly generated key (StudioNet is gasless with simulated balances)
+// The key is never written to stdout or logs.
+//
+// The insured event is env-overridable so the claim path can be pointed at a real,
+// independently verifiable historical weather event rather than a synthetic window:
+//   RL_LOCATION, RL_LAT, RL_LON, RL_THRESHOLD, RL_START, RL_END, RL_PREMIUM_GEN,
+//   RL_PAYOUT_GEN, RL_PERIL, RL_CLAIM_ATTEMPTS
 //
 // Usage:
-//   node scripts/onchain-verify.mjs <keystorePath> <keystorePassword> [buy|claim|both] [policyId]
+//   node scripts/onchain-verify.mjs [keystorePath] [keystorePassword] [buy|claim|both] [policyId]
 
 import { readFileSync, existsSync } from "node:fs";
 import crypto from "node:crypto";
-import { createClient, createAccount } from "genlayer-js";
+import { createClient, createAccount, generatePrivateKey } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 
 if (existsSync(".env.local")) {
@@ -44,12 +51,19 @@ function decryptKeystore(path, password) {
 }
 
 const [, , keystorePath, keystorePassword, mode = "both", explicitPolicyId] = process.argv;
-if (!keystorePath || !keystorePassword) {
-  console.error("Usage: node scripts/onchain-verify.mjs <keystorePath> <keystorePassword> [buy|claim|both] [policyId]");
-  process.exit(1);
+
+let privateKey;
+if (process.env.RAINLINE_PK) {
+  privateKey = process.env.RAINLINE_PK;
+  console.log("Key source: RAINLINE_PK env var");
+} else if (keystorePath && keystorePassword) {
+  privateKey = decryptKeystore(keystorePath, keystorePassword);
+  console.log("Key source: keystore file");
+} else {
+  privateKey = generatePrivateKey();
+  console.log("Key source: freshly generated (StudioNet is gasless / balances simulated)");
 }
 
-const privateKey = decryptKeystore(keystorePath, keystorePassword);
 const account = createAccount(privateKey);
 const address = process.env.NEXT_PUBLIC_RAINLINE_CONTRACT;
 const endpoint = process.env.NEXT_PUBLIC_GENLAYER_ENDPOINT ?? "https://studio.genlayer.com/api";
@@ -69,7 +83,7 @@ async function waitAndReport(label, hash) {
     interval: 5000,
     retries: 100,
   });
-  console.log(`[${label}] status: ${receipt.status}`);
+  console.log(`[${label}] status: ${receipt.status_name ?? receipt.status}`);
   return receipt;
 }
 
@@ -81,34 +95,42 @@ async function main() {
 
   if (mode === "buy" || mode === "both") {
     const GEN = 10n ** 18n;
-    const now = new Date();
-    const start = new Date(now.getTime() - 5 * 60 * 1000).toISOString().replace(/\.\d+Z$/, "Z");
-    const end = new Date(now.getTime() + 30 * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+    // Defaults describe Hurricane Harvey over Houston, 26-29 Aug 2017: an event both
+    // independent APIs record as catastrophic (ERA5 ~143mm, NASA POWER ~237mm on 27 Aug)
+    // and one of the most heavily documented storms on record, so all three evidence legs
+    // can be checked against reality by anyone reviewing this.
+    const peril = process.env.RL_PERIL ?? "RAIN";
+    const location = process.env.RL_LOCATION ?? "Houston, Texas, US";
+    const lat = process.env.RL_LAT ?? "29.76";
+    const lon = process.env.RL_LON ?? "-95.37";
+    const threshold =
+      process.env.RL_THRESHOLD ??
+      "More than 100mm of rainfall in any single 24h window during the coverage period counts as a qualifying flood loss.";
+    const start = process.env.RL_START ?? "2017-08-26T00:00:00Z";
+    const end = process.env.RL_END ?? "2017-08-29T00:00:00Z";
+    const premium = BigInt(process.env.RL_PREMIUM_GEN ?? "100") * GEN;
+    const payout = BigInt(process.env.RL_PAYOUT_GEN ?? "20") * GEN;
 
     console.log("\n--- buy_policy (payable, real GEN value) ---");
+    console.log(`Insured event: ${peril} at ${location} (${lat}, ${lon}) ${start} -> ${end}`);
+    console.log(`Premium ${premium / GEN} GEN, payout ${payout / GEN} GEN`);
+
     const hash = await client.writeContract({
       address,
       functionName: "buy_policy",
-      args: [
-        "RAIN",
-        "Onchain Verify Farm, KE",
-        "-1.2921",
-        "36.8219",
-        "More than 80mm of rain in a 24h window during the coverage period counts as a qualifying flood loss.",
-        start,
-        end,
-        2n * GEN,
-      ],
-      value: 10n * GEN,
+      args: [peril, location, lat, lon, threshold, start, end, payout],
+      value: premium,
     });
-    const receipt = await waitAndReport("buy_policy", hash);
-    console.log("buy_policy receipt status_name:", receipt.status_name ?? receipt.status);
+    await waitAndReport("buy_policy", hash);
 
     const summary = await client.readContract({ address, functionName: "get_summary", args: [] });
     console.log("get_summary after buy_policy:", summary);
 
-    const listing = await client.readContract({ address, functionName: "list_policies_by_holder", args: [account.address, 0n, 5n] });
-    console.log("policies for this account:", JSON.stringify(listing, null, 2));
+    const listing = await client.readContract({
+      address,
+      functionName: "list_policies_by_holder",
+      args: [account.address, 0n, 5n],
+    });
     if (Array.isArray(listing) && listing.length > 0) {
       policyId = listing[listing.length - 1].id;
     }
@@ -117,33 +139,46 @@ async function main() {
 
   if ((mode === "claim" || mode === "both") && policyId) {
     console.log("\n--- check_claim (consensus round, may take several minutes) ---");
+    const maxAttempts = Number(process.env.RL_CLAIM_ATTEMPTS ?? "3");
     let attempt = 0;
-    let receipt;
-    while (attempt < 3) {
+    while (attempt < maxAttempts) {
       attempt += 1;
       try {
         const hash = await client.writeContract({
           address,
           functionName: "check_claim",
           args: [policyId],
+          value: 0n,
         });
         console.log(`[check_claim attempt ${attempt}] tx hash: ${hash}`);
-        receipt = await client.waitForTransactionReceipt({
+        const receipt = await client.waitForTransactionReceipt({
           hash,
           status: "FINALIZED",
           interval: 10000,
           retries: 90, // ~15 min budget
         });
-        console.log(`[check_claim attempt ${attempt}] status:`, receipt.status_name ?? receipt.status);
-        break;
+        console.log(`[check_claim attempt ${attempt}] tx status:`, receipt.status_name ?? receipt.status);
+
+        const policy = await client.readContract({ address, functionName: "get_policy", args: [policyId] });
+        console.log(`[check_claim attempt ${attempt}] verdict:`, policy.verdict, "| policy status:", policy.status);
+        console.log("Policy state:", JSON.stringify(policy, null, 2));
+
+        // A payout-bearing or clean-negative verdict is terminal; only abstention is retryable.
+        if (policy.verdict && policy.verdict !== "INSUFFICIENT_EVIDENCE") break;
+        if (attempt < maxAttempts) {
+          console.log("Abstained. Waiting out the recheck cooldown before retrying...");
+          await new Promise((r) => setTimeout(r, 1805 * 1000));
+        }
       } catch (err) {
         console.error(`[check_claim attempt ${attempt}] error:`, err.message ?? err);
-        if (attempt >= 3) throw err;
+        if (attempt >= maxAttempts) throw err;
       }
     }
 
-    const policy = await client.readContract({ address, functionName: "get_policy", args: [policyId] });
-    console.log("Final policy state:", JSON.stringify(policy, null, 2));
+    const finalPolicy = await client.readContract({ address, functionName: "get_policy", args: [policyId] });
+    console.log("\nFINAL policy state:", JSON.stringify(finalPolicy, null, 2));
+    const finalSummary = await client.readContract({ address, functionName: "get_summary", args: [] });
+    console.log("FINAL get_summary:", finalSummary);
   } else if (mode === "claim" && !policyId) {
     console.error("No policyId provided or discovered for claim mode.");
     process.exit(1);
