@@ -1,17 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Moon, Sun } from "lucide-react";
 
 const THEME_KEY = "rainline.theme";
 
-export function ThemeToggle() {
-  const [theme, setTheme] = useState<"dark" | "light" | null>(null);
+function readStoredTheme(): "dark" | "light" {
+  if (typeof window === "undefined") return "dark";
+  return window.localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
+}
 
-  useEffect(() => {
-    const stored = window.localStorage.getItem(THEME_KEY);
-    setTheme(stored === "light" ? "light" : "dark");
-  }, []);
+export function ThemeToggle() {
+  const [theme, setTheme] = useState<"dark" | "light">(readStoredTheme);
 
   function toggle() {
     const next = theme === "light" ? "dark" : "light";

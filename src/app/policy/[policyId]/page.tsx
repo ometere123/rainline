@@ -51,7 +51,7 @@ export default async function PolicyDetail({ params }: { params: Promise<{ polic
               </div>
               {policy.verdict === "INSUFFICIENT_EVIDENCE" ? (
                 <p className="mt-4 text-xs" style={{ color: "hsl(var(--warn))" }}>
-                  Logged as static, the reads disagreed or came back thin. That's an abstention, not a denial;
+                  Logged as static, the reads disagreed or came back thin. That&apos;s an abstention, not a denial;
                   anyone can pull another reading once the cooldown clears.
                 </p>
               ) : null}
