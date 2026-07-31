@@ -33,13 +33,17 @@ from gltest.assertions import tx_execution_succeeded, tx_execution_failed
 GEN = 10**18
 
 
-def _window(start_in: int = 20, length: int = 10):
-    """A short coverage window starting shortly in the future.
+def _window(start_in: int = 240, length: int = 10):
+    """A coverage window starting in the future, sized for the quote-then-buy flow.
 
-    request_quote and buy_policy_from_quote both refuse retroactive cover, so the window
-    cannot be hardcoded to a past date. The lead time absorbs the gap between building the
-    args here and the contract reading its own transaction timestamp; the window is kept
-    short so a test that has to wait for it to elapse does not add much to the run.
+    Both request_quote and buy_policy_from_quote refuse retroactive cover, so the window
+    cannot be hardcoded to a past date. Unlike the old single-step buy_policy, every purchase
+    now goes through request_quote first, which is a real, separate consensus round that
+    routinely takes 90-150s on StudioNet -- observed directly while proving this out: a 20s
+    lead time (sized for the old synchronous purchase) meant coverage_start had already
+    elapsed by the time buy_policy_from_quote ran, and the retroactive-cover guard correctly
+    (but unhelpfully, for the test) refused the purchase. 240s gives enough headroom for the
+    quote round plus the buy transaction itself.
     """
     now = datetime.now(timezone.utc)
     start = now + timedelta(seconds=start_in)
@@ -97,18 +101,17 @@ def _request_quote(
     return receipt
 
 
-def _latest_quote(contract, holder, attempts=6, delay_seconds=5):
-    """list_quotes_by_requester can lag a beat behind a just-finalized request_quote write on
-    an immediate read -- observed directly while proving this out on real StudioNet traffic, not
-    a hypothetical. Retry the read itself, separate from _retryable's write-status retry."""
-    last_error = None
-    for _ in range(attempts):
-        quotes = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()
-        if quotes:
-            return quotes[-1]
-        last_error = AssertionError("list_quotes_by_requester returned no quotes yet")
-        time.sleep(delay_seconds)
-    raise last_error
+def _latest_quote(contract, holder):
+    """Read the just-created quote by its deterministic id (RLQ-{quote_count}) instead of
+    trusting list_quotes_by_requester's holder-address filter, which was observed directly on
+    real StudioNet traffic to come back empty for a request that had already finalized
+    successfully -- most likely an address-encoding mismatch between the eth_account object
+    gltest hands back from get_accounts() and the Address string the contract records as
+    gl.message.sender_address, not a propagation delay (retrying that same filtered read for 30s
+    still found nothing). quote_count from get_summary is authoritative regardless of that."""
+    summary = contract.get_summary(args=[]).call()
+    quote_id = f"RLQ-{summary['quote_count']}"
+    return contract.get_quote(args=[quote_id]).call()
 
 
 def test_deploy_succeeds():
@@ -253,8 +256,9 @@ def test_check_claim_runs_live_consensus_after_coverage_ends():
     holder = accounts[0]
     as_holder = contract.connect(holder)
     _fund(as_holder)
-    # Long enough to survive the quote + buy transactions settling before the window closes.
-    coverage_start, coverage_end = _window(start_in=25, length=10)
+    # _window()'s default lead time already accounts for request_quote's live consensus round
+    # elapsing before this test can even attempt to buy.
+    coverage_start, coverage_end = _window()
 
     _request_quote(as_holder, coverage_start, coverage_end, requested_payout=2 * GEN)
     quote = _latest_quote(contract, holder)
@@ -269,7 +273,13 @@ def test_check_claim_runs_live_consensus_after_coverage_ends():
     as_holder.buy_policy_from_quote(args=[quote["id"]]).transact(value=premium)
     policy_id = contract.list_policies(args=[0, 10]).call()[0]["id"]
 
-    time.sleep(45)  # let the short coverage window fully elapse on-chain
+    # Sleep until coverage_end has genuinely passed on-chain, computed from the real clock
+    # rather than a fixed guess, since the quote round already consumed an unpredictable amount
+    # of the lead time _window() built in.
+    end_dt = datetime.strptime(coverage_end, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    remaining = (end_dt - datetime.now(timezone.utc)).total_seconds()
+    if remaining > 0:
+        time.sleep(remaining + 5)
 
     _retryable(lambda: as_holder.check_claim(args=[policy_id]).transact(
         wait_interval=10000, wait_retries=90,
