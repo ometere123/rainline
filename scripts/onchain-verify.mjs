@@ -119,7 +119,7 @@ async function main() {
   let quoteId = mode === "quote" || mode === "all" || mode === "fund" ? undefined : explicitId;
   let policyId = mode === "claim" ? explicitId : undefined;
 
-  if (mode === "fund" || mode === "all" || mode === "quote" || mode === "buy") {
+  if (mode === "fund" || mode === "all" || mode === "quote" || (mode === "buy" && !quoteId)) {
     // A lone leveraged purchase can never be the first thing that happens to an empty pool
     // (required_premium is always strictly less than requested_payout, so the 20%-of-pool
     // concentration cap is unsatisfiable for a first purchase). fund_pool is the deterministic,
@@ -139,7 +139,7 @@ async function main() {
     if (mode === "fund") return;
   }
 
-  if (mode === "quote" || mode === "all" || mode === "buy") {
+  if (mode === "quote" || mode === "all" || (mode === "buy" && !quoteId)) {
     const ev = eventArgs();
     console.log("\n--- request_quote (consensus round: 1 climatology fetch + 1 risk-banding prompt) ---");
     console.log(`Peril ${ev.peril} at ${ev.location} (${ev.lat}, ${ev.lon})`);
@@ -155,14 +155,15 @@ async function main() {
     });
     await waitAndReport("request_quote", hash);
 
-    const quotes = await client.readContract({
-      address,
-      functionName: "list_quotes_by_requester",
-      args: [account.address, 0n, 5n],
-    });
-    if (Array.isArray(quotes) && quotes.length > 0) {
-      const q = quotes[quotes.length - 1];
-      quoteId = q.id;
+    // Read quote_count directly rather than "the last entry in list_quotes_by_requester" -- that
+    // list can lag a beat behind a just-finalized write on a fresh read, which was observed
+    // directly while proving this out (a stale read returned an older quote as "latest").
+    // quote_count is authoritative and gives the exact id deterministically.
+    const summaryAfterQuote = await client.readContract({ address, functionName: "get_summary", args: [] });
+    const newQuoteId = `RLQ-${summaryAfterQuote.quote_count}`;
+    const q = await client.readContract({ address, functionName: "get_quote", args: [newQuoteId] });
+    if (q) {
+      quoteId = newQuoteId;
       console.log("\nQuote id:", q.id);
       console.log("Risk band:", q.risk_band);
       console.log("Max payout multiple:", q.max_payout_multiple);
