@@ -1,23 +1,27 @@
 const steps = [
   {
-    title: "01. Open a ticket",
-    body: "Name a peril (rain, heat, wind, air quality), a location, a plain-language threshold, and a coverage window. Pay a premium in GEN. It doesn't go to Rainline; it joins the Cistern, the shared pool that funds every payout, not just yours.",
+    title: "01. Request a quote",
+    body: "Name a peril (rain, heat, wind, air quality), a location, a structured threshold (a number and a window kind, not a sentence), a coverage window, and how much payout you want. GenLayer consensus fetches real historical climatology for that spot and prices how likely your condition is, historically, into a risk band. No GEN moves yet.",
   },
   {
-    title: "02. The weather clock runs",
+    title: "02. Read the band, then buy",
+    body: "The quote comes back with a risk band (LOW, MODERATE, HIGH, or UNPRICEABLE), a rationale citing the real historical figures the model saw, and the exact premium required for the payout you asked for. Buying pays that premium in GEN. It doesn't go to Rainline; it joins the Cistern, the shared pool that funds every payout, not just yours.",
+  },
+  {
+    title: "03. The weather clock runs",
     body: "Your ticket sits ACTIVE for the whole window. Nothing needs to happen on-chain during this time. The deterministic gate that opens a reading simply hasn't unlocked yet. No one is watching a clock on your behalf; the contract just refuses reads before the window closes.",
   },
   {
-    title: "03. Anyone can pull a reading",
-    body: "Once the window closes, calling check_claim is permissionless. You, a neighbor, or an automated keeper can pull it. The contract fetches weather-station data, a satellite/precipitation summary, and local reports itself, for your exact location and dates. Nobody self-reports; the chain goes and looks.",
+    title: "04. Anyone can pull a reading",
+    body: "Once the window closes, calling check_claim is permissionless. You, a neighbor, or an automated keeper can pull it. The contract fetches weather-station data, a satellite/precipitation summary, and local reports itself, for your exact location and dates, and compares them directly against your structured threshold. Nobody self-reports; the chain goes and looks.",
   },
   {
-    title: "04. Validators log a verdict",
+    title: "05. Validators log a verdict",
     body: "GenLayer validators each independently gather the same three reads and reconcile them into a severity band: NONE, MINOR, MODERATE, or SEVERE. MODERATE and SEVERE draw an automatic payout from the Cistern. No adjuster signs off, and no insurer's word decides it.",
   },
   {
-    title: "05. Static isn't a denial",
-    body: "If the reads disagree or lack detail for your exact coordinates and dates, the log records INSUFFICIENT_EVIDENCE: static, not silence. The ticket stays open for a retry after a cooldown. A claim is never dropped for being inconvenient to answer.",
+    title: "06. Static isn't a denial",
+    body: "If the reads disagree or lack detail for your exact coordinates and dates, the log records INSUFFICIENT_EVIDENCE: static, not silence. The ticket stays open for a retry after a cooldown. A claim is never dropped for being inconvenient to answer. The same discipline applies to a quote that comes back UNPRICEABLE: it is an honest abstention, not a guess dressed up as a number.",
   },
 ];
 
