@@ -33,17 +33,17 @@ from gltest.assertions import tx_execution_succeeded, tx_execution_failed
 GEN = 10**18
 
 
-def _window(start_in: int = 240, length: int = 10):
+def _window(start_in: int = 900, length: int = 15):
     """A coverage window starting in the future, sized for the quote-then-buy flow.
 
     Both request_quote and buy_policy_from_quote refuse retroactive cover, so the window
     cannot be hardcoded to a past date. Unlike the old single-step buy_policy, every purchase
-    now goes through request_quote first, which is a real, separate consensus round that
-    routinely takes 90-150s on StudioNet -- observed directly while proving this out: a 20s
-    lead time (sized for the old synchronous purchase) meant coverage_start had already
-    elapsed by the time buy_policy_from_quote ran, and the retroactive-cover guard correctly
-    (but unhelpfully, for the test) refused the purchase. 240s gives enough headroom for the
-    quote round plus the buy transaction itself.
+    now goes through request_quote first, which is a real, separate consensus round -- normally
+    90-150s on StudioNet, but observed directly while proving this out to occasionally take
+    much longer (one run took 467s, presumably including at least one retry round). A 240s
+    lead time was still too tight and the retroactive-cover guard correctly (but unhelpfully,
+    for the test) refused the purchase once. 900s gives comfortable headroom even for a slow
+    or retried quote round plus the buy transaction itself.
     """
     now = datetime.now(timezone.utc)
     start = now + timedelta(seconds=start_in)
