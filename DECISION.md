@@ -233,9 +233,19 @@ Every terminal state has an explicit resting place for funds:
   use.
 - **F — Decision depth / recoverability**: `INSUFFICIENT_EVIDENCE` is retryable via a
   permissionless cooldown-gated recheck rather than a dead end.
-- **G — Latency-appropriate architecture**: fast deterministic writes for policy creation,
-  a separate, explicitly slow, permissionlessly-triggerable consensus step for claim
-  evaluation, with a deterministic pre-gate so ineligible calls fail cheaply.
+- **G — Latency-appropriate architecture**: fast deterministic writes (`fund_pool`,
+  `buy_policy_from_quote`) for value movement, two separate, explicitly slow,
+  permissionlessly-triggerable consensus steps -- `request_quote` for underwriting,
+  `check_claim` for claim evaluation -- each with its own deterministic pre-gate so an
+  ineligible call fails cheaply before any nondeterministic operation runs.
+
+Underwriting (`request_quote`) satisfies the same gates independently: it moves no value itself
+but *gates* how much value a subsequent purchase may move (gate B, indirectly), it is
+irreducibly semantic (pricing likelihood from a real historical time series is judgement, not a
+lookup -- gate C), its one fetch happens inside the leader function of its own consensus round
+(gate D), any number of quotes can be requested over the contract's lifetime (gate E), and
+`UNPRICEABLE` is the same non-dead-end abstention as `INSUFFICIENT_EVIDENCE` -- a quote is still
+stored and auditable, purchase is simply refused (gate F).
 
 ## Self-audit
 
