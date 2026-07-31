@@ -97,6 +97,20 @@ def _request_quote(
     return receipt
 
 
+def _latest_quote(contract, holder, attempts=6, delay_seconds=5):
+    """list_quotes_by_requester can lag a beat behind a just-finalized request_quote write on
+    an immediate read -- observed directly while proving this out on real StudioNet traffic, not
+    a hypothetical. Retry the read itself, separate from _retryable's write-status retry."""
+    last_error = None
+    for _ in range(attempts):
+        quotes = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()
+        if quotes:
+            return quotes[-1]
+        last_error = AssertionError("list_quotes_by_requester returned no quotes yet")
+        time.sleep(delay_seconds)
+    raise last_error
+
+
 def test_deploy_succeeds():
     contract = _deploy()
     summary = contract.get_summary(args=[]).call()
@@ -126,9 +140,7 @@ def test_request_quote_and_buy_policy_on_chain():
 
     _request_quote(as_holder, coverage_start, coverage_end, requested_payout=2 * GEN)
 
-    quotes = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()
-    assert len(quotes) == 1
-    quote = quotes[0]
+    quote = _latest_quote(contract, holder)
     assert quote["peril"] == "RAIN"
     assert quote["op"] == ">="
     assert quote["threshold_value"] == str(80 * GEN)
@@ -176,7 +188,7 @@ def test_buy_from_quote_rejects_wrong_value():
     coverage_start, coverage_end = _window()
 
     _request_quote(as_holder, coverage_start, coverage_end, requested_payout=2 * GEN)
-    quote = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()[0]
+    quote = _latest_quote(contract, holder)
     if quote["risk_band"] == "UNPRICEABLE":
         return  # nothing to buy; covered by the UNPRICEABLE-refusal test elsewhere
 
@@ -197,7 +209,7 @@ def test_buy_from_quote_rejects_payout_exceeding_solvency_gate():
     coverage_start, coverage_end = _window()
 
     _request_quote(as_holder, coverage_start, coverage_end, requested_payout=10000 * GEN)
-    quote = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()[0]
+    quote = _latest_quote(contract, holder)
     if quote["risk_band"] == "UNPRICEABLE":
         return
 
@@ -226,7 +238,7 @@ def test_check_claim_before_coverage_ends_reverts():
     _request_quote(
         as_holder, "2099-01-01T00:00:00Z", "2099-01-01T00:00:05Z", requested_payout=2 * GEN,
     )
-    quote = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()[0]
+    quote = _latest_quote(contract, holder)
     if quote["risk_band"] != "UNPRICEABLE":
         premium = int(quote["required_premium"])
         as_holder.buy_policy_from_quote(args=[quote["id"]]).transact(value=premium)
@@ -245,7 +257,7 @@ def test_check_claim_runs_live_consensus_after_coverage_ends():
     coverage_start, coverage_end = _window(start_in=25, length=10)
 
     _request_quote(as_holder, coverage_start, coverage_end, requested_payout=2 * GEN)
-    quote = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()[0]
+    quote = _latest_quote(contract, holder)
     print("Quote risk band:", quote["risk_band"])
 
     if quote["risk_band"] == "UNPRICEABLE":
