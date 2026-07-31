@@ -3,19 +3,25 @@
 Run with:
     python -m pytest tests/integration/ -v -s --network studionet
 
-These exercise the real deployed-contract lifecycle: deploy, buy a policy
-with real value, and check status through the public RPC. The claim
-evaluation path (`check_claim`) genuinely triggers a live consensus round
-with real web fetches and a real LLM call on StudioNet, so those tests are
-slower and are written to tolerate the documented retryable statuses
-(UNDETERMINED / VALIDATORS_TIMEOUT / LEADER_TIMEOUT) by retrying rather than
-failing outright.
+These exercise the real deployed-contract lifecycle: deploy, fund the pool (a plain payable
+deposit, no consensus involved), request a quote (a live consensus round pricing historical
+likelihood), buy a policy from that quote for its exact required premium, and check status
+through the public RPC. Both `request_quote` and `check_claim` genuinely trigger live consensus
+rounds with real web fetches and a real LLM call on StudioNet, so those tests are slower and are
+written to tolerate the documented retryable statuses (UNDETERMINED / VALIDATORS_TIMEOUT /
+LEADER_TIMEOUT) by retrying rather than failing outright.
 
-Note on the installed gltest API (genlayer-test 0.29.2): contract methods
-return a `ContractFunction` object, not a result directly. Reads are
-performed with `.call()`; writes are performed with `.transact(value=...)`,
-which returns the transaction receipt. To send from a specific account,
-`.connect(account)` returns a new Contract bound to that signer.
+Why every test funds the pool first: required_premium is derived from requested_payout by the
+risk band's fixed multiplier (LOW=15x, MODERATE=8x, HIGH=3x), so requested_payout is always
+strictly greater than required_premium for any real policy. That makes the 20%-of-pool
+concentration cap mathematically impossible to satisfy for the very first purchase against an
+empty pool, on any real deployment, not just in these tests -- see `fund_pool`'s docstring in
+the contract. `fund_pool` is the only way to bootstrap liquidity from nothing.
+
+Note on the installed gltest API (genlayer-test 0.29.2): contract methods return a
+`ContractFunction` object, not a result directly. Reads are performed with `.call()`; writes are
+performed with `.transact(value=...)`, which returns the transaction receipt. To send from a
+specific account, `.connect(account)` returns a new Contract bound to that signer.
 """
 
 import time
@@ -30,10 +36,10 @@ GEN = 10**18
 def _window(start_in: int = 20, length: int = 10):
     """A short coverage window starting shortly in the future.
 
-    `buy_policy` refuses retroactive cover, so the window cannot be hardcoded to a past
-    date. The lead time absorbs the gap between building the args here and the contract
-    reading its own transaction timestamp; the window is kept short so a test that has to
-    wait for it to elapse does not add much to the run.
+    request_quote and buy_policy_from_quote both refuse retroactive cover, so the window
+    cannot be hardcoded to a past date. The lead time absorbs the gap between building the
+    args here and the contract reading its own transaction timestamp; the window is kept
+    short so a test that has to wait for it to elapse does not add much to the run.
     """
     now = datetime.now(timezone.utc)
     start = now + timedelta(seconds=start_in)
@@ -41,126 +47,21 @@ def _window(start_in: int = 20, length: int = 10):
     fmt = "%Y-%m-%dT%H:%M:%SZ"
     return start.strftime(fmt), end.strftime(fmt)
 
+
 def _deploy():
     factory = get_contract_factory("Rainline")
     return factory.deploy(args=[])
 
 
-def test_deploy_succeeds():
-    contract = _deploy()
-    summary = contract.get_summary(args=[]).call()
-    assert summary["policy_count"] == 0
-    assert summary["pool_balance"] == "0"
-    assert summary["outstanding_liability"] == "0"
-
-
-def test_buy_policy_on_chain():
-    contract = _deploy()
-    accounts = get_accounts()
-    holder = accounts[0]
-    as_holder = contract.connect(holder)
-    coverage_start, coverage_end = _window()
-
-    receipt = as_holder.buy_policy(
-        args=[
-            "RAIN",
-            "Test Valley Farm",
-            "-1.29",
-            "36.82",
-            "More than 80mm of rain in a 24h window during coverage counts as a qualifying loss.",
-            coverage_start,
-            coverage_end,
-            2 * GEN,
-        ],
-    ).transact(value=10 * GEN)
+def _fund(as_holder, amount_gen=1000):
+    receipt = as_holder.fund_pool(args=[]).transact(value=amount_gen * GEN)
     assert tx_execution_succeeded(receipt), receipt.get("consensus_data")
-
-    summary = contract.get_summary(args=[]).call()
-    assert summary["policy_count"] == 1
-    assert summary["pool_balance"] == str(10 * GEN)
-    assert summary["outstanding_liability"] == str(2 * GEN)
-
-    policies = contract.list_policies(args=[0, 10]).call()
-    assert policies[0]["status"] == "ACTIVE"
-    assert policies[0]["peril"] == "RAIN"
-
-
-def test_buy_policy_rejects_zero_value():
-    contract = _deploy()
-    accounts = get_accounts()
-    holder = accounts[0]
-    as_holder = contract.connect(holder)
-    coverage_start, coverage_end = _window()
-
-    receipt = as_holder.buy_policy(
-        args=[
-            "RAIN",
-            "Test Valley Farm",
-            "-1.29",
-            "36.82",
-            "More than 80mm of rain in a 24h window counts as a qualifying loss.",
-            coverage_start,
-            coverage_end,
-            5 * GEN,
-        ],
-    ).transact(value=0)
-    assert tx_execution_failed(receipt)
-
-
-def test_buy_policy_rejects_payout_exceeding_solvency_gate():
-    """Deterministic solvency gate: a payout requesting more than the pool can safely back
-    (10x the premium, or 20% of the resulting pool balance) must revert on-chain, not just in
-    the direct/mocked test suite."""
-    contract = _deploy()
-    accounts = get_accounts()
-    holder = accounts[0]
-    as_holder = contract.connect(holder)
-    coverage_start, coverage_end = _window()
-
-    receipt = as_holder.buy_policy(
-        args=[
-            "RAIN",
-            "Test Valley Farm",
-            "-1.29",
-            "36.82",
-            "More than 80mm of rain in a 24h window counts as a qualifying loss.",
-            coverage_start,
-            coverage_end,
-            50 * GEN,  # 5x the 10 GEN premium's concentration cap of 2 GEN
-        ],
-    ).transact(value=10 * GEN)
-    assert tx_execution_failed(receipt)
-
-
-def test_check_claim_before_coverage_ends_reverts():
-    contract = _deploy()
-    accounts = get_accounts()
-    holder = accounts[0]
-    as_holder = contract.connect(holder)
-
-    as_holder.buy_policy(
-        args=[
-            "RAIN",
-            "Test Valley Farm",
-            "-1.29",
-            "36.82",
-            "More than 80mm of rain in a 24h window counts as a qualifying loss.",
-            "2099-01-01T00:00:00Z",
-            "2099-01-01T00:00:05Z",
-            2 * GEN,
-        ],
-    ).transact(value=10 * GEN)
-    policy_id = contract.list_policies(args=[0, 10]).call()[0]["id"]
-
-    receipt = as_holder.check_claim(args=[policy_id]).transact()
-    assert tx_execution_failed(receipt)
 
 
 def _retryable(fn, attempts=3, delay_seconds=8):
-    """Retry a live-consensus call across the retryable transaction statuses
-    the GenLayer node can legitimately return (UNDETERMINED,
-    VALIDATORS_TIMEOUT, LEADER_TIMEOUT) rather than treating them as
-    hard failures."""
+    """Retry a live-consensus call across the retryable transaction statuses the GenLayer
+    node can legitimately return (UNDETERMINED, VALIDATORS_TIMEOUT, LEADER_TIMEOUT) rather
+    than treating them as hard failures."""
     last_exc = None
     for _ in range(attempts):
         try:
@@ -175,26 +76,185 @@ def _retryable(fn, attempts=3, delay_seconds=8):
     raise last_exc
 
 
+def _request_quote(
+    as_holder, coverage_start, coverage_end,
+    threshold_value=80 * GEN, window="SINGLE_DAY_MAX", requested_payout=2 * GEN,
+):
+    receipt = _retryable(lambda: as_holder.request_quote(
+        args=[
+            "RAIN",
+            "Test Valley Farm",
+            "-1.29",
+            "36.82",
+            threshold_value,
+            window,
+            coverage_start,
+            coverage_end,
+            requested_payout,
+        ],
+    ).transact(wait_interval=10000, wait_retries=90))
+    assert tx_execution_succeeded(receipt), receipt.get("consensus_data")
+    return receipt
+
+
+def test_deploy_succeeds():
+    contract = _deploy()
+    summary = contract.get_summary(args=[]).call()
+    assert summary["policy_count"] == 0
+    assert summary["quote_count"] == 0
+    assert summary["pool_balance"] == "0"
+    assert summary["outstanding_liability"] == "0"
+
+
+def test_fund_pool_credits_balance_without_a_policy():
+    contract = _deploy()
+    accounts = get_accounts()
+    as_holder = contract.connect(accounts[0])
+    _fund(as_holder, 5)
+    summary = contract.get_summary(args=[]).call()
+    assert summary["pool_balance"] == str(5 * GEN)
+    assert summary["policy_count"] == 0
+
+
+def test_request_quote_and_buy_policy_on_chain():
+    contract = _deploy()
+    accounts = get_accounts()
+    holder = accounts[0]
+    as_holder = contract.connect(holder)
+    _fund(as_holder)
+    coverage_start, coverage_end = _window()
+
+    _request_quote(as_holder, coverage_start, coverage_end, requested_payout=2 * GEN)
+
+    quotes = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()
+    assert len(quotes) == 1
+    quote = quotes[0]
+    assert quote["peril"] == "RAIN"
+    assert quote["op"] == ">="
+    assert quote["threshold_value"] == str(80 * GEN)
+    assert quote["window"] == "SINGLE_DAY_MAX"
+    assert quote["requested_payout"] == str(2 * GEN)
+    assert quote["risk_band"] in ("LOW", "MODERATE", "HIGH", "UNPRICEABLE")
+    assert quote["consumed"] is False
+    print("Quote risk band:", quote["risk_band"])
+    print("Quote rationale:", quote["rationale"])
+    print("Quote climatology summary:", quote["climatology_summary"])
+    print("Required premium:", quote["required_premium"])
+
+    if quote["risk_band"] == "UNPRICEABLE":
+        # Cannot buy from an UNPRICEABLE quote by design; verify the refusal on-chain and stop.
+        receipt = as_holder.buy_policy_from_quote(args=[quote["id"]]).transact(value=1 * GEN)
+        assert tx_execution_failed(receipt)
+        return
+
+    premium = int(quote["required_premium"])
+    before = int(contract.get_summary(args=[]).call()["pool_balance"])
+    receipt = as_holder.buy_policy_from_quote(args=[quote["id"]]).transact(value=premium)
+    assert tx_execution_succeeded(receipt), receipt.get("consensus_data")
+
+    summary = contract.get_summary(args=[]).call()
+    assert summary["policy_count"] == 1
+    assert summary["pool_balance"] == str(before + premium)
+    assert summary["outstanding_liability"] == str(2 * GEN)
+
+    policies = contract.list_policies(args=[0, 10]).call()
+    assert policies[0]["status"] == "ACTIVE"
+    assert policies[0]["peril"] == "RAIN"
+    assert policies[0]["quote_id"] == quote["id"]
+    assert policies[0]["premium"] == str(premium)
+    assert policies[0]["payout_amount"] == str(2 * GEN)
+
+
+def test_buy_from_quote_rejects_wrong_value():
+    """The transaction value must equal the quote's required_premium exactly (see
+    buy_policy_from_quote's docstring on why overpayment is rejected rather than refunded)."""
+    contract = _deploy()
+    accounts = get_accounts()
+    holder = accounts[0]
+    as_holder = contract.connect(holder)
+    _fund(as_holder)
+    coverage_start, coverage_end = _window()
+
+    _request_quote(as_holder, coverage_start, coverage_end, requested_payout=2 * GEN)
+    quote = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()[0]
+    if quote["risk_band"] == "UNPRICEABLE":
+        return  # nothing to buy; covered by the UNPRICEABLE-refusal test elsewhere
+
+    receipt = as_holder.buy_policy_from_quote(args=[quote["id"]]).transact(value=0)
+    assert tx_execution_failed(receipt)
+
+
+def test_buy_from_quote_rejects_payout_exceeding_solvency_gate():
+    """Deterministic solvency gate: a payout requesting more than the pool can safely back
+    must revert on-chain, not just in the direct/mocked test suite. A requested_payout large
+    enough to exceed even the most generous (LOW-band, 15x) multiplier against the funded pool
+    is guaranteed to trip gate 2 (the 20%-of-pool concentration cap)."""
+    contract = _deploy()
+    accounts = get_accounts()
+    holder = accounts[0]
+    as_holder = contract.connect(holder)
+    _fund(as_holder, 10)  # a small pool: 10 GEN
+    coverage_start, coverage_end = _window()
+
+    _request_quote(as_holder, coverage_start, coverage_end, requested_payout=10000 * GEN)
+    quote = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()[0]
+    if quote["risk_band"] == "UNPRICEABLE":
+        return
+
+    premium = int(quote["required_premium"])
+    receipt = as_holder.buy_policy_from_quote(args=[quote["id"]]).transact(value=premium)
+    assert tx_execution_failed(receipt)
+
+
+def test_buy_from_quote_rejects_unknown_quote():
+    contract = _deploy()
+    accounts = get_accounts()
+    holder = accounts[0]
+    as_holder = contract.connect(holder)
+
+    receipt = as_holder.buy_policy_from_quote(args=["RLQ-999"]).transact(value=1 * GEN)
+    assert tx_execution_failed(receipt)
+
+
+def test_check_claim_before_coverage_ends_reverts():
+    contract = _deploy()
+    accounts = get_accounts()
+    holder = accounts[0]
+    as_holder = contract.connect(holder)
+    _fund(as_holder)
+
+    _request_quote(
+        as_holder, "2099-01-01T00:00:00Z", "2099-01-01T00:00:05Z", requested_payout=2 * GEN,
+    )
+    quote = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()[0]
+    if quote["risk_band"] != "UNPRICEABLE":
+        premium = int(quote["required_premium"])
+        as_holder.buy_policy_from_quote(args=[quote["id"]]).transact(value=premium)
+        policy_id = contract.list_policies(args=[0, 10]).call()[0]["id"]
+        receipt = as_holder.check_claim(args=[policy_id]).transact()
+        assert tx_execution_failed(receipt)
+
+
 def test_check_claim_runs_live_consensus_after_coverage_ends():
     contract = _deploy()
     accounts = get_accounts()
     holder = accounts[0]
     as_holder = contract.connect(holder)
-    # Long enough to survive the buy transaction settling before the window closes.
+    _fund(as_holder)
+    # Long enough to survive the quote + buy transactions settling before the window closes.
     coverage_start, coverage_end = _window(start_in=25, length=10)
 
-    as_holder.buy_policy(
-        args=[
-            "RAIN",
-            "Nairobi test plot",
-            "-1.29",
-            "36.82",
-            "More than 80mm of rain in a 24h window counts as a qualifying loss.",
-            coverage_start,
-            coverage_end,
-            2 * GEN,
-        ],
-    ).transact(value=10 * GEN)
+    _request_quote(as_holder, coverage_start, coverage_end, requested_payout=2 * GEN)
+    quote = contract.list_quotes_by_requester(args=[holder.address, 0, 10]).call()[0]
+    print("Quote risk band:", quote["risk_band"])
+
+    if quote["risk_band"] == "UNPRICEABLE":
+        # Rare on real climatology, but honest: nothing to buy or claim in that case. The
+        # UNPRICEABLE-refusal behavior itself is covered by the direct test suite.
+        return
+
+    premium = int(quote["required_premium"])
+    as_holder.buy_policy_from_quote(args=[quote["id"]]).transact(value=premium)
     policy_id = contract.list_policies(args=[0, 10]).call()[0]["id"]
 
     time.sleep(45)  # let the short coverage window fully elapse on-chain

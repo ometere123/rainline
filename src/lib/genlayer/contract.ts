@@ -2,7 +2,7 @@ import { TransactionStatus } from "genlayer-js/types";
 import type { CalldataEncodable, GenLayerClient, TransactionHash } from "genlayer-js/types";
 import { CONTRACT_ADDRESS, REQUIRED_METHODS } from "./config";
 import { createReadClient } from "./read-client";
-import type { Policy, Summary } from "../types";
+import type { Policy, Quote, Summary } from "../types";
 
 type Client = GenLayerClient<typeof import("./config").chain>;
 
@@ -52,6 +52,24 @@ export async function getPolicy(id: string): Promise<Policy | undefined> {
   return readMaybe<Policy>(() => client.readContract({ address, functionName: "get_policy", args: [id] }));
 }
 
+export async function getQuote(id: string): Promise<Quote | undefined> {
+  if (!CONTRACT_ADDRESS) return undefined;
+  const address = CONTRACT_ADDRESS;
+  const client = createReadClient();
+  return readMaybe<Quote>(() => client.readContract({ address, functionName: "get_quote", args: [id] }));
+}
+
+export async function listQuotesByRequester(account: `0x${string}`): Promise<Quote[]> {
+  if (!CONTRACT_ADDRESS) return [];
+  const address = CONTRACT_ADDRESS;
+  const client = createReadClient();
+  return (await readMaybe<Quote[]>(() => client.readContract({
+    address,
+    functionName: "list_quotes_by_requester",
+    args: [account, 0n, 50n],
+  }))) ?? [];
+}
+
 export async function writeContract(
   client: Client,
   functionName: string,
@@ -73,7 +91,9 @@ function emptySummary(): Summary {
   return {
     admin: "",
     policy_count: 0,
+    quote_count: 0,
     pool_balance: "0",
+    outstanding_liability: "0",
     contract_balance: "0",
   };
 }

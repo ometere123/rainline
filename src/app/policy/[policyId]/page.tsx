@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { CheckClaimButton, ExpireUnclaimedButton } from "@/components/write-actions";
 import { getPolicy } from "@/lib/genlayer/contract";
 import { displayTime, formatGen, perilLabel, shortenAddress, statusLogLabel, statusTone, verdictLogLabel } from "@/lib/format";
+import { formatThreshold } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -32,8 +33,17 @@ export default async function PolicyDetail({ params }: { params: Promise<{ polic
         </div>
 
         <div className="mt-8">
-          <TextBlock label="Threshold on file" text={policy.threshold_label} />
+          <TextBlock label="Structured condition on file" text={formatThreshold(policy.peril, policy.op, policy.threshold_value, policy.window)} />
         </div>
+
+        {policy.quote_id ? (
+          <div className="mt-4 rl-gauge">
+            <span className="rl-tag">Bought under quote</span>
+            <div className="rl-mono mt-2 text-sm">
+              {policy.quote_id} &middot; risk band {policy.risk_band || "n/a"}
+            </div>
+          </div>
+        ) : null}
 
         {policy.verdict ? (
           <div className="mt-8">

@@ -1,10 +1,10 @@
-// Standalone on-chain verification script for Rainline's payable write path.
+// Standalone on-chain verification script for Rainline's fund-then-quote-then-buy-then-claim
+// flow.
 //
-// The `genlayer` CLI's `write` command hardcodes `value: 0n`, so it cannot exercise
-// `buy_policy`, which is `@gl.public.write.payable` and requires real GEN attached. This
-// script uses genlayer-js directly to send a real payable buy_policy transaction against
-// StudioNet, wait for it to finalize, and print the resulting state so the outcome can be
-// recorded as real proof (not simulated) in the README.
+// The `genlayer` CLI's `write` command hardcodes `value: 0n`, so it cannot exercise any payable
+// method (`fund_pool`, `buy_policy_from_quote`). This script uses genlayer-js directly to send
+// real transactions against StudioNet, wait for them to finalize, and print the resulting state
+// so the outcome can be recorded as real proof (not simulated) in the README.
 //
 // Signing key resolution, in order:
 //   1. RAINLINE_PK env var (0x-prefixed hex private key)
@@ -12,13 +12,14 @@
 //   3. a freshly generated key (StudioNet is gasless with simulated balances)
 // The key is never written to stdout or logs.
 //
-// The insured event is env-overridable so the claim path can be pointed at a real,
-// independently verifiable historical weather event rather than a synthetic window:
-//   RL_LOCATION, RL_LAT, RL_LON, RL_THRESHOLD, RL_START, RL_END, RL_PREMIUM_GEN,
-//   RL_PAYOUT_GEN, RL_PERIL, RL_CLAIM_ATTEMPTS
+// The insured event is env-overridable so the flow can be pointed at a real location and a
+// genuinely future coverage window (the no-retroactive-cover guard forbids reusing historical
+// windows once coverage has already elapsed relative to purchase time):
+//   RL_LOCATION, RL_LAT, RL_LON, RL_THRESHOLD_VALUE, RL_WINDOW, RL_START, RL_END,
+//   RL_REQUESTED_PAYOUT_GEN, RL_FUND_GEN, RL_PERIL, RL_CLAIM_ATTEMPTS
 //
 // Usage:
-//   node scripts/onchain-verify.mjs [keystorePath] [keystorePassword] [buy|claim|both] [policyId]
+//   node scripts/onchain-verify.mjs [keystorePath] [keystorePassword] [fund|quote|buy|claim|all] [quoteOrPolicyId]
 
 import { readFileSync, existsSync } from "node:fs";
 import crypto from "node:crypto";
@@ -50,7 +51,7 @@ function decryptKeystore(path, password) {
   return "0x" + privateKey.toString("hex");
 }
 
-const [, , keystorePath, keystorePassword, mode = "both", explicitPolicyId] = process.argv;
+const [, , keystorePath, keystorePassword, mode = "all", explicitId] = process.argv;
 
 let privateKey;
 if (process.env.RAINLINE_PK) {
@@ -74,57 +75,142 @@ if (!address) {
 }
 
 const client = createClient({ chain: studionet, endpoint, account });
+const GEN = 10n ** 18n;
 
-async function waitAndReport(label, hash) {
+async function waitAndReport(label, hash, retries = 100) {
   console.log(`[${label}] tx hash: ${hash}`);
   const receipt = await client.waitForTransactionReceipt({
     hash,
     status: "FINALIZED",
-    interval: 5000,
-    retries: 100,
+    interval: 10000,
+    retries,
   });
   console.log(`[${label}] status: ${receipt.status_name ?? receipt.status}`);
   return receipt;
+}
+
+function eventArgs() {
+  // Defaults point at a genuinely future coverage window (computed at run time, not a fixed
+  // historical date) so the no-retroactive-cover guard is satisfied honestly rather than
+  // reusing a known past event.
+  const now = new Date();
+  const start = new Date(now.getTime() + 5 * 60 * 1000); // 5 min out
+  const end = new Date(start.getTime() + 60 * 60 * 1000); // 1h window
+  const fmt = (d) => d.toISOString().replace(/\.\d+Z$/, "Z");
+
+  return {
+    peril: process.env.RL_PERIL ?? "RAIN",
+    location: process.env.RL_LOCATION ?? "Houston, Texas, US",
+    lat: process.env.RL_LAT ?? "29.76",
+    lon: process.env.RL_LON ?? "-95.37",
+    thresholdValue: BigInt(process.env.RL_THRESHOLD_VALUE ?? "80") * GEN,
+    window: process.env.RL_WINDOW ?? "SINGLE_DAY_MAX",
+    start: process.env.RL_START ?? fmt(start),
+    end: process.env.RL_END ?? fmt(end),
+    requestedPayout: BigInt(process.env.RL_REQUESTED_PAYOUT_GEN ?? "2") * GEN,
+    fundGen: BigInt(process.env.RL_FUND_GEN ?? "1000") * GEN,
+  };
 }
 
 async function main() {
   console.log("Account:", account.address);
   console.log("Contract:", address);
 
-  let policyId = explicitPolicyId;
+  let quoteId = mode === "quote" || mode === "all" || mode === "fund" ? undefined : explicitId;
+  let policyId = mode === "claim" ? explicitId : undefined;
 
-  if (mode === "buy" || mode === "both") {
-    const GEN = 10n ** 18n;
-    // Defaults describe Hurricane Harvey over Houston, 26-29 Aug 2017: an event both
-    // independent APIs record as catastrophic (ERA5 ~143mm, NASA POWER ~237mm on 27 Aug)
-    // and one of the most heavily documented storms on record, so all three evidence legs
-    // can be checked against reality by anyone reviewing this.
-    const peril = process.env.RL_PERIL ?? "RAIN";
-    const location = process.env.RL_LOCATION ?? "Houston, Texas, US";
-    const lat = process.env.RL_LAT ?? "29.76";
-    const lon = process.env.RL_LON ?? "-95.37";
-    const threshold =
-      process.env.RL_THRESHOLD ??
-      "More than 100mm of rainfall in any single 24h window during the coverage period counts as a qualifying flood loss.";
-    const start = process.env.RL_START ?? "2017-08-26T00:00:00Z";
-    const end = process.env.RL_END ?? "2017-08-29T00:00:00Z";
-    const premium = BigInt(process.env.RL_PREMIUM_GEN ?? "100") * GEN;
-    const payout = BigInt(process.env.RL_PAYOUT_GEN ?? "20") * GEN;
+  if (mode === "fund" || mode === "all" || mode === "quote" || mode === "buy") {
+    // A lone leveraged purchase can never be the first thing that happens to an empty pool
+    // (required_premium is always strictly less than requested_payout, so the 20%-of-pool
+    // concentration cap is unsatisfiable for a first purchase). fund_pool is the deterministic,
+    // non-consensus deposit path that bootstraps liquidity -- see its docstring in the contract.
+    const ev = eventArgs();
+    console.log("\n--- fund_pool (payable, real GEN value, no consensus round) ---");
+    const fundHash = await client.writeContract({
+      address,
+      functionName: "fund_pool",
+      args: [],
+      value: ev.fundGen,
+    });
+    await waitAndReport("fund_pool", fundHash, 30);
+    const summaryAfterFund = await client.readContract({ address, functionName: "get_summary", args: [] });
+    console.log("get_summary after fund_pool:", summaryAfterFund);
 
-    console.log("\n--- buy_policy (payable, real GEN value) ---");
-    console.log(`Insured event: ${peril} at ${location} (${lat}, ${lon}) ${start} -> ${end}`);
-    console.log(`Premium ${premium / GEN} GEN, payout ${payout / GEN} GEN`);
+    if (mode === "fund") return;
+  }
+
+  if (mode === "quote" || mode === "all" || mode === "buy") {
+    const ev = eventArgs();
+    console.log("\n--- request_quote (consensus round: 1 climatology fetch + 1 risk-banding prompt) ---");
+    console.log(`Peril ${ev.peril} at ${ev.location} (${ev.lat}, ${ev.lon})`);
+    console.log(`Structured condition: >= ${ev.thresholdValue / GEN} (${ev.window})`);
+    console.log(`Coverage window: ${ev.start} -> ${ev.end}`);
+    console.log(`Requested payout: ${ev.requestedPayout / GEN} GEN`);
 
     const hash = await client.writeContract({
       address,
-      functionName: "buy_policy",
-      args: [peril, location, lat, lon, threshold, start, end, payout],
+      functionName: "request_quote",
+      args: [ev.peril, ev.location, ev.lat, ev.lon, ev.thresholdValue, ev.window, ev.start, ev.end, ev.requestedPayout],
+      value: 0n,
+    });
+    await waitAndReport("request_quote", hash);
+
+    const quotes = await client.readContract({
+      address,
+      functionName: "list_quotes_by_requester",
+      args: [account.address, 0n, 5n],
+    });
+    if (Array.isArray(quotes) && quotes.length > 0) {
+      const q = quotes[quotes.length - 1];
+      quoteId = q.id;
+      console.log("\nQuote id:", q.id);
+      console.log("Risk band:", q.risk_band);
+      console.log("Max payout multiple:", q.max_payout_multiple);
+      console.log("Required premium:", q.required_premium, "wei");
+      console.log("Rationale:", q.rationale);
+      console.log("Climatology summary:", q.climatology_summary);
+      console.log("Expires at:", q.expires_at);
+    }
+
+    if (mode === "quote") return;
+
+    if (quoteId) {
+      const q = await client.readContract({ address, functionName: "get_quote", args: [quoteId] });
+      if (q.risk_band === "UNPRICEABLE") {
+        console.log("\nQuote rated UNPRICEABLE -- buy_policy_from_quote must refuse this. Verifying refusal...");
+        try {
+          const buyHash = await client.writeContract({
+            address,
+            functionName: "buy_policy_from_quote",
+            args: [quoteId],
+            value: 1n, // any nonzero value; the UNPRICEABLE check fires before the exact-value check
+          });
+          const receipt = await waitAndReport("buy_policy_from_quote (expect ERROR)", buyHash, 30);
+          console.log("Result (should be ERROR):", receipt.consensus_data?.leader_receipt?.[0]?.execution_result);
+        } catch (err) {
+          console.log("buy_policy_from_quote correctly rejected the UNPRICEABLE quote:", err.message ?? err);
+        }
+        return;
+      }
+    }
+  }
+
+  if (mode === "buy" || mode === "all") {
+    const q = await client.readContract({ address, functionName: "get_quote", args: [quoteId] });
+    const premium = BigInt(q.required_premium);
+    console.log("\n--- buy_policy_from_quote (payable, exact required_premium) ---");
+    console.log(`Quote: ${quoteId}, required premium: ${premium} wei (${Number(premium) / 1e18} GEN)`);
+
+    const hash = await client.writeContract({
+      address,
+      functionName: "buy_policy_from_quote",
+      args: [quoteId],
       value: premium,
     });
-    await waitAndReport("buy_policy", hash);
+    await waitAndReport("buy_policy_from_quote", hash);
 
     const summary = await client.readContract({ address, functionName: "get_summary", args: [] });
-    console.log("get_summary after buy_policy:", summary);
+    console.log("get_summary after buy_policy_from_quote:", summary);
 
     const listing = await client.readContract({
       address,
@@ -137,8 +223,8 @@ async function main() {
     console.log("Using policyId for claim step:", policyId);
   }
 
-  if ((mode === "claim" || mode === "both") && policyId) {
-    console.log("\n--- check_claim (consensus round, may take several minutes) ---");
+  if ((mode === "claim" || mode === "all") && policyId) {
+    console.log("\n--- check_claim (consensus round: 3 fetches + reconciliation, may take several minutes) ---");
     const maxAttempts = Number(process.env.RL_CLAIM_ATTEMPTS ?? "3");
     let attempt = 0;
     while (attempt < maxAttempts) {
@@ -180,7 +266,7 @@ async function main() {
     const finalSummary = await client.readContract({ address, functionName: "get_summary", args: [] });
     console.log("FINAL get_summary:", finalSummary);
   } else if (mode === "claim" && !policyId) {
-    console.error("No policyId provided or discovered for claim mode.");
+    console.error("No policyId provided for claim mode.");
     process.exit(1);
   }
 }

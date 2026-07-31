@@ -16,11 +16,15 @@ export const chain = CHAINS[CHAIN_NAME];
 export const EXPLORER_BASE = chain.blockExplorers?.default.url ?? "https://studio.genlayer.com";
 
 export const REQUIRED_METHODS = [
-  "buy_policy",
+  "fund_pool",
+  "request_quote",
+  "buy_policy_from_quote",
   "check_claim",
   "expire_unclaimed",
   "get_summary",
   "get_policy",
+  "get_quote",
   "list_policies",
   "list_policies_by_holder",
+  "list_quotes_by_requester",
 ];

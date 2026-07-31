@@ -63,9 +63,10 @@ of an identical byte-for-byte computation.
 
 ## Non-determinism budget
 
-Every `check_claim` call is one consensus round containing exactly **four** non-deterministic
-operations inside the leader function, evaluated once per validator under
-`prompt_comparative`:
+Rainline now runs **two separate** `gl.eq_principle.prompt_comparative` consensus rounds, each
+independently kept inside the project's 2-4 nondet-operation budget:
+
+### `check_claim` — four operations (unchanged from the original design)
 
 1. `gl.nondet.web.render(...)` — fetch weather-station style evidence for the location/window.
 2. `gl.nondet.web.render(...)` — fetch satellite/precipitation-summary style evidence.
@@ -76,6 +77,95 @@ operations inside the leader function, evaluated once per validator under
 This sits at the top of the target 2-4 operation budget deliberately: dropping any one of the
 three fetches would remove exactly the cross-source reconciliation that makes the decision
 semantic rather than a single-feed lookup, which is the whole point of the gate below.
+
+### `request_quote` — two operations (new, underwriting)
+
+1. `gl.nondet.web.render(...)` — one continuous multi-year climatology fetch from Open-Meteo's
+   archive API.
+2. `gl.nondet.exec_prompt(...)` — reconcile the fetched history into a banded risk rating with
+   a rationale citing the real figures it found, returned as JSON.
+
+This sits at the bottom of the budget deliberately, with headroom below `check_claim`'s four
+operations: underwriting is a single-source statistical read (how often, historically, did this
+condition occur here), not a multi-source dispute needing a tie-breaker between disagreeing
+providers. Adding a second climatology source (e.g. NASA POWER, mirroring `check_claim`'s basis-
+risk design) was considered and rejected for this round specifically: `check_claim`'s
+three-source reconciliation exists to resolve disagreement about whether a *specific past event*
+already happened, where basis risk (a coarse grid smoothing away a real localised event) is the
+central risk being managed. `request_quote` is instead estimating a *distribution* over many past
+years at one location; the exact figures matter less than the shape of the historical record, and
+a second grid at ~50km resolution over the same broad time window would agree with the first far
+more often than it would meaningfully change the risk band. One well-chosen source stays honest
+about what this step can support (see "Evidence fetches" below) without manufacturing a second
+disagreement to reconcile that the design does not actually need.
+
+Why the climatology fetch is one continuous multi-year range, not one call per year (verified
+against the real API with `curl` before writing the contract): Open-Meteo's archive API only
+accepts a single continuous `start_date`/`end_date` range per call — there is no "same calendar
+day across N disjoint years" query. Fetching each of the last 5-10 years separately would need
+5-10 separate `gl.nondet.web.render` calls on its own, which blows the entire 2-4 operation
+budget before the reconciliation prompt is even counted. The one-fetch alternative that fits the
+budget is a single continuous range covering roughly the 3 years immediately prior to the
+proposed coverage window (`curl`-measured at ~20KB / ~1100 days of daily JSON for a real 3-year
+span), with the reconciliation prompt told to locate the calendar days matching the target
+window within each year present. This trades "5-10 years of history" down to "~3 years" in
+exchange for staying at one fetch; this is disclosed, not hidden, in "Honest limitations" below.
+
+## Underwriting: pricing likelihood, not just capping claim size
+
+Before this pass, `buy_policy` bounded claim *size* (10x premium, 20% of pool, aggregate
+liability) but never priced claim *likelihood*: a buyer could write an easy-to-trigger threshold
+in free text and still buy up to the flat multiplier's ceiling against it. `request_quote`
+closes that gap by pricing the condition's historical likelihood first, in its own consensus
+round, before any purchase is possible.
+
+**UNPRICEABLE is refused outright, not merely discounted.** Mirroring `INSUFFICIENT_EVIDENCE`'s
+abstention discipline exactly: thin or conflicting historical data (e.g. fewer than two
+comparable past years present in the fetched window) means the contract has no honest basis to
+price the condition at any multiple, so `buy_policy_from_quote` refuses to sell against it. The
+quote itself is still stored — the abstention is auditable — but `max_payout_multiple` and
+`required_premium` are both zero and no purchase can proceed.
+
+**Premium is derived by the contract, not chosen by the buyer.** The buyer states
+`requested_payout` (how much cover they want); the contract computes
+`required_premium = ceil(requested_payout / BAND_MULTIPLIER[risk_band])`, floored at
+`MIN_PREMIUM_WEI` (0.001 GEN) so a small requested_payout cannot round down to a near-dust
+premium. This was a deliberate design change during this pass, away from an earlier version
+where the buyer chose `payout_amount` at purchase time against a band-derived ceiling: letting
+the buyer pick both premium and payout independently reopened exactly the unpriced-leverage gap
+this whole feature exists to close (a buyer could still under-pay relative to the band by
+picking a small premium under the ceiling). Deriving premium mechanically from the quote's fixed
+terms leaves the buyer exactly one dial — how much cover to request — with the price for that
+cover fixed by the risk the consensus round already priced.
+
+**A real, load-bearing consequence of that design: `fund_pool` had to be added.** Because
+`required_premium` is always strictly less than `requested_payout` for any real leveraged policy
+(every `BAND_MULTIPLIER` value is >= 3), the 20%-of-pool concentration cap
+(`payout <= (pool_balance + premium) / 5`) is mathematically impossible to satisfy for the very
+first purchase against a completely empty pool, for any band, on any deployment — not just in
+tests. `fund_pool` is a plain deterministic payable deposit (no consensus, no policy created,
+does not touch `outstanding_liability`) that exists specifically to break that bootstrap
+deadlock, the same way a real parametric insurer's pool is seeded by underwriters/liquidity
+providers depositing capital independent of any single policy. This was discovered, not
+anticipated: the first StudioNet deploy of the redesigned contract could not sell its own first
+policy until `fund_pool` was added, which is exactly the kind of gap this task's "real on-chain
+proof" requirement exists to surface.
+
+**`buy_policy_from_quote` is open to any sender, not only the address that requested the quote.**
+A quote's content — peril, location, structured threshold, requested payout, risk band, required
+premium — is public market data about a location/window, not a private offer to one address.
+There is no confidentiality reason to restrict who may act on it, and doing so would cut against
+this contract's existing permissionless philosophy (`check_claim` and `expire_unclaimed` are
+both already callable by anyone). The `consumed` flag, not sender identity, is what prevents a
+quote from being double-spent.
+
+**Transaction value must equal `required_premium` exactly, not merely `>=` it.** This project
+already has one documented, unresolved defect: a reverted `@gl.public.write.payable` call does
+not refund `gl.message.value` (see README "Honest limitations"). Accepting overpayment and
+crediting only `required_premium` to the pool would strand the excess by the same mechanism —
+a second stranded-value edge case layered on top of the first. Requiring an exact match instead
+means overpayment is rejected before any state changes, so the buyer's wallet still shows the
+funds and the transaction can simply be resubmitted with the correct value.
 
 ## Abstention: INSUFFICIENT_EVIDENCE is not a denial
 

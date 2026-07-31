@@ -16,13 +16,17 @@ const chainName = process.env.NEXT_PUBLIC_GENLAYER_CHAIN ?? "studionet";
 const endpoint = process.env.NEXT_PUBLIC_GENLAYER_ENDPOINT ?? "https://studio.genlayer.com/api";
 const address = process.env.NEXT_PUBLIC_RAINLINE_CONTRACT;
 const required = [
-  "buy_policy",
+  "fund_pool",
+  "request_quote",
+  "buy_policy_from_quote",
   "check_claim",
   "expire_unclaimed",
   "get_summary",
   "get_policy",
+  "get_quote",
   "list_policies",
   "list_policies_by_holder",
+  "list_quotes_by_requester",
 ];
 
 if (!address) {
