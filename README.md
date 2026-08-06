@@ -447,7 +447,21 @@ structured condition shape.
 python -m pytest tests/integration/ -v -s --network studionet
 ```
 
-<!-- INTEGRATION_RESULT_PLACEHOLDER -->
+Because `buy_policy` (now `request_quote` / `buy_policy_from_quote`) refuses retroactive cover,
+these derive a short coverage window starting seconds in the future via `_window()` at call time,
+rather than hardcoding a date that would go stale mid-run.
+
+Result: **8 passed** across two runs. The first full run (1658.49s / 27m38s, dominated by the live
+`check_claim` consensus round) got 7/8 on the first pass — `test_buy_from_quote_rejects_payout_exceeding_solvency_gate`
+failed with a `ConnectionResetError` from StudioNet's RPC mid-poll (`('Connection aborted.',
+ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host'...))`),
+a transient network failure, not a code defect — the transaction itself was never rejected by the
+contract, the poll for its receipt was. Re-running that one test in isolation passed cleanly in
+156.85s. Kept both runs here rather than only reporting the clean one: covers deploy, `fund_pool`
+crediting balance without a policy, a real `request_quote` + `buy_policy_from_quote` round with a
+real risk band and rationale printed to stdout, a rejected wrong-value purchase, the solvency gate
+rejecting an oversized request on-chain, a rejected unknown-quote purchase, a rejected pre-window
+claim check, and a live `check_claim` consensus round resolving to a valid severity band.
 
 ### Static checks
 
