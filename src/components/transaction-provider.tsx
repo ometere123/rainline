@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { StoredTransaction, TxStage } from "@/lib/types";
 import { readTransactions, writeTransactions } from "@/lib/storage";
 import { createReadClient } from "@/lib/genlayer/read-client";
+import { explorerTxUrl } from "@/lib/genlayer/config";
 
 type TransactionContextValue = {
   transactions: StoredTransaction[];
@@ -16,7 +17,6 @@ const TransactionContext = createContext<TransactionContextValue | null>(null);
 const COMPLETE_STATUSES = ["ACCEPTED", "FINALIZED", "CANCELED", "UNDETERMINED"] as const;
 const ACTIVE_STATUSES = ["PENDING", "PROPOSING", "COMMITTING", "REVEALING", "READY_TO_FINALIZE"] as const;
 const STALE_AFTER_MS = 2 * 60 * 60 * 1000;
-const EXPLORER_TX_BASE = "https://explorer-studio.genlayer.com/tx";
 
 function shouldRefresh(tx: StoredTransaction) {
   if (!ACTIVE_STATUSES.includes(tx.status as never)) return false;
@@ -158,7 +158,7 @@ export function TransactionRail() {
                 <a
                   className="rl-mono mt-2 block truncate text-xs underline-offset-4 hover:underline"
                   style={{ color: "hsl(var(--primary))" }}
-                  href={`${EXPLORER_TX_BASE}/${tx.hash}`}
+                  href={explorerTxUrl(tx.hash)}
                   target="_blank"
                   rel="noreferrer"
                 >

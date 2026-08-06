@@ -3,6 +3,7 @@ import { CheckClaimButton, ExpireUnclaimedButton } from "@/components/write-acti
 import { getPolicy } from "@/lib/genlayer/contract";
 import { displayTime, formatGen, perilLabel, shortenAddress, statusLogLabel, statusTone, verdictLogLabel } from "@/lib/format";
 import { formatThreshold } from "@/lib/types";
+import { CONTRACT_ADDRESS, explorerAddressUrl } from "@/lib/genlayer/config";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,17 @@ export default async function PolicyDetail({ params }: { params: Promise<{ polic
         <p className="mt-1 text-sm text-[hsl(var(--muted-foreground))]">
           {perilLabel(policy.peril)} at ({policy.latitude}, {policy.longitude}) &middot; ticket held by {shortenAddress(policy.holder)}
         </p>
+        {CONTRACT_ADDRESS ? (
+          <a
+            className="mt-1 inline-block text-xs underline-offset-4 hover:underline"
+            style={{ color: "hsl(var(--primary))" }}
+            href={explorerAddressUrl(CONTRACT_ADDRESS)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View the contract&apos;s full transaction history on the StudioNet explorer
+          </a>
+        ) : null}
 
         <div className="mt-6 grid gap-4 md:grid-cols-3">
           <Panel label="Clock starts" value={displayTime(policy.coverage_start)} />

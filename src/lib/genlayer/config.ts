@@ -13,7 +13,13 @@ const CHAINS = { studionet, localnet, testnetAsimov, testnetBradbury } as const;
 
 export const chain = CHAINS[CHAIN_NAME];
 
-export const EXPLORER_BASE = chain.blockExplorers?.default.url ?? "https://studio.genlayer.com";
+// genlayer-js's built-in chain metadata for studionet still points at
+// genlayer-explorer.vercel.app, but the correct StudioNet explorer is
+// explorer-studio.genlayer.com -- override it explicitly rather than trust
+// chain.blockExplorers here.
+export const EXPLORER_BASE = "https://explorer-studio.genlayer.com";
+export const explorerTxUrl = (hash: string) => `${EXPLORER_BASE}/tx/${hash}`;
+export const explorerAddressUrl = (address: string) => `${EXPLORER_BASE}/address/${address}`;
 
 export const REQUIRED_METHODS = [
   "fund_pool",

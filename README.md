@@ -314,7 +314,7 @@ LEADER_TIMEOUT are surfaced as retryable states rather than hard errors
 ## Deployed contract (StudioNet)
 
 - **Address**: `0x723B3eD974fB0E5f9A5a04C51D86935C3EcCAb2f`
-- **Explorer**: https://genlayer-explorer.vercel.app/address/0x723B3eD974fB0E5f9A5a04C51D86935C3EcCAb2f
+- **Explorer**: https://explorer-studio.genlayer.com/address/0x723B3eD974fB0E5f9A5a04C51D86935C3EcCAb2f
 - **Deploy tx**: `0x8083e7a7696944bb269e5c7ed1cdda83eded8cbbd3d419eb08b111df2248237e`
 
 This is the current deployment, carrying structured thresholds, quote-band underwriting,

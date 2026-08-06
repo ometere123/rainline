@@ -1,7 +1,8 @@
 import Link from "next/link";
-import { CloudRain } from "lucide-react";
+import { CloudRain, ExternalLink } from "lucide-react";
 import { WalletPanel } from "./wallet-panel";
 import { ThemeToggle } from "./theme-toggle";
+import { CONTRACT_ADDRESS, explorerAddressUrl } from "@/lib/genlayer/config";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
@@ -25,7 +26,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               The Ledger
             </Link>
             <Link className="rl-btn-primary px-4 py-2 text-sm" href="/policies/new">
-              Open a Ticket
+              Request a Quote
             </Link>
             <Link className="rl-btn-ghost px-4 py-2 text-sm" href="/dashboard">
               Your Tickets
@@ -37,8 +38,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </header>
       <main id="main">{children}</main>
       <footer className="mx-auto max-w-5xl px-5 py-10 text-sm text-[hsl(var(--muted-foreground))]">
-        Rainline is a GenLayer Intelligent Contract. The deployed contract is the sole source of truth for every
-        ticket, stake, reading, and payout, this site only reads and writes to it.
+        <p>
+          Rainline is a GenLayer Intelligent Contract. The deployed contract is the sole source of truth for every
+          quote, ticket, stake, reading, and payout, this site only reads and writes to it.
+        </p>
+        {CONTRACT_ADDRESS ? (
+          <a
+            className="mt-3 inline-flex items-center gap-1.5 underline-offset-4 hover:underline"
+            href={explorerAddressUrl(CONTRACT_ADDRESS)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View contract on the StudioNet explorer
+            <ExternalLink size={13} aria-hidden />
+          </a>
+        ) : null}
       </footer>
     </div>
   );
