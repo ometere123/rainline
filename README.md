@@ -16,6 +16,9 @@ pool called the Cistern.
 
 ### Aug 10 review response
 
+For a concise request-by-request evidence trail, see
+[`REVIEW_RESPONSE.md`](./REVIEW_RESPONSE.md).
+
 This revision directly addresses the requested production and settlement corrections:
 
 - **Production quote discovery no longer uses `list_quotes_by_requester`.** The app snapshots
