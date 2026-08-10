@@ -48,7 +48,7 @@ export function statusTone(status: string) {
 }
 
 export function perilLabel(peril: string) {
-  return { RAIN: "Rain / flood", HEAT: "Extreme heat", WIND: "Wind", AIR: "Air quality" }[peril] ?? peril;
+  return { RAIN: "Rain / flood", HEAT: "Extreme heat", WIND: "Wind" }[peril] ?? peril;
 }
 
 // Rainline's own log vocabulary. The contract's real enum value is always

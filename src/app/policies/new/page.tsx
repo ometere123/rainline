@@ -10,7 +10,8 @@ export default function NewPolicyPage() {
         window -- a real climatology fetch and a risk band, not a guess. Only after that is priced can you buy
         cover, and only for the exact premium the band requires. What you stake joins the Cistern, the shared
         pool that funds every ticket&apos;s payout, not just yours. Nothing pays out until a future reading
-        finds MODERATE or SEVERE against the threshold you set here.
+        reconciles the provider readings into a normalized measurement that meets the exact numeric threshold
+        stored on your policy.
       </p>
       <div className="mt-8">
         <RequestQuoteThenBuy />

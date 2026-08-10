@@ -14,6 +14,30 @@ the exact premium the band requires. After the coverage window closes, anyone ca
 sources, asks GenLayer validators to reconcile it, and pays eligible claims from a shared GEN
 pool called the Cistern.
 
+### Aug 10 review response
+
+This revision directly addresses the requested production and settlement corrections:
+
+- **Production quote discovery no longer uses `list_quotes_by_requester`.** The app snapshots
+  `get_summary().quote_count` before the write, waits for finalization, reads every new
+  `RLQ-{sequence}` through `get_quote`, and matches requester plus all submitted terms. This is
+  the same summary/direct-read strategy proven in the repository, hardened for concurrent users.
+- **The StudioNet integration proof cannot pass without a purchase.**
+  `test_finalized_quote_is_found_by_production_reads_and_purchased` discovers the finalized quote
+  through those production reads, pays its exact premium, verifies the quote was consumed, and
+  verifies the policy copied the quoted terms. `UNPRICEABLE` is a failure for this proof, not a
+  silent early return.
+- **Provider observations are normalized before reconciliation.** Rain and heat already share
+  mm and degrees C respectively; Open-Meteo wind is explicitly requested in km/h and NASA
+  `WS10M_MAX` is converted from m/s by exactly 3.6. NASA `-999` and declared fill values are
+  missing data, never zero. Cumulative aggregation is restricted to rainfall.
+- **Consensus no longer authorizes payout with a severity word.** It resolves disagreement into
+  `resolved_value_milli`, a canonical measurement in thousandths of the policy unit. The
+  deterministic contract compares that value with the exact stored `threshold_value`; only that
+  arithmetic sets `trigger_met` and moves GEN. Severity is derived afterward for display.
+- **Air quality was removed rather than falsely normalized.** NASA `AOD_55` is aerosol optical
+  depth, not AQI, so treating it as an independent AQI reading would be scientifically invalid.
+
 GenLayer is central to the product at two separate points, not one: pricing *likelihood* before a
 policy can be bought, and judging *occurrence* after coverage ends. Both are irreducibly semantic
 — weather sources disagree materially across grid models and time, and there is no deterministic
@@ -21,13 +45,13 @@ formula that turns raw numbers into "how likely is this" or "did this actually h
 
 - **Live app**: add deployment URL here when published
 - **Source**: add GitHub repo URL here when published
-- **Contract**: `0x723B3eD974fB0E5f9A5a04C51D86935C3EcCAb2f`
+- **Contract**: `0x12eDBfD43d0cc1Be9DC090Bbe35bA66578b9A2ED`
 - **Main workflow**: request a quote (consensus prices historical likelihood into a risk band) ->
   buy cover from that quote for its exact required premium -> wait for the coverage window to end
-  -> trigger `check_claim` -> validators fetch and reconcile public evidence -> contract records
-  a verdict and pays qualifying claims.
+  -> trigger `check_claim` -> validators normalize and reconcile public evidence into a numeric
+  measurement -> contract evaluates the stored trigger and pays qualifying claims.
 
-A policyholder requests cover against one peril (rain/flood, extreme heat, wind, or air quality)
+A policyholder requests cover against one peril (rain/flood, extreme heat, or wind)
 at one location, for a structured condition (e.g. "rainfall >= 80mm, single-day max") over a
 future coverage window. GenLayer consensus fetches real historical climatology for that
 location/window and prices a risk band (`LOW` / `MODERATE` / `HIGH` / `UNPRICEABLE`), which fixes
@@ -36,9 +60,9 @@ derives the premium the band requires to back it, into a shared pool (called "th
 UI). After coverage ends, **anyone** can permissionlessly trigger `check_claim`. The Intelligent
 Contract then fetches, from inside consensus, two independent real meteorological APIs (ECMWF
 ERA5 reanalysis via Open-Meteo, and NASA POWER satellite-derived data) plus a corroborating report
-search, and asks GenLayer validators to reconcile all three into a banded severity verdict (NONE /
-MINOR / MODERATE / SEVERE / INSUFFICIENT_EVIDENCE). MODERATE and SEVERE pay out automatically from
-the pool.
+search, and asks GenLayer validators to reconcile normalized observations into one canonical
+numeric measurement. Deterministic contract arithmetic compares that measurement with the exact
+trigger stored at purchase; the LLM's prose and severity label cannot authorize a payout.
 
 The two numeric sources sit on different models at different grid resolutions and **routinely
 disagree** — on the day the 2024 Valencia flood killed over 200 people, ERA5 recorded 105 mm and
@@ -46,10 +70,11 @@ NASA POWER recorded 21.9 mm for the same coordinates. Deciding which reading ref
 actually happened on one insured field is a judgement call, not a formula, and it is the reason
 this contract needs consensus rather than an oracle.
 
-**Proven on-chain (current, quote-based deployment)**: see [Real on-chain
-proof](#real-on-chain-proof-not-simulated) for the actual quote, buy, and claim transactions run
-against `0x723B…Ab2f` for this pass, with real tx hashes and the real risk band/rationale the
-model returned.
+**Proven on-chain**: the reviewer-specific StudioNet integration test finalized a real `LOW`
+quote, discovered it through the production summary/direct-read strategy, purchased it for the
+exact quoted premium, and verified both quote consumption and copied policy terms. The current
+corrected deployment is linked below; the earlier full claim trace is retained as historical
+evidence and clearly labeled.
 
 ## Problem and counterfactual
 
@@ -74,25 +99,21 @@ solvency gates bounded claim *size*, never claim *likelihood*.
 A `Policy` (and a `Quote`) now carries a fully structured condition instead:
 
 - **metric**: implied by `peril`, not stored as a separate field — `RAIN` always means
-  `RAINFALL_MM`, `HEAT` always means `MAX_TEMP_C`, `WIND` always means `WIND_KMH`, `AIR` always
-  means `AQI`. This removes a whole class of bug where a peril and an unrelated metric could be
-  paired (e.g. `RAIN` insured against an AQI reading).
+  `RAINFALL_MM`, `HEAT` always means `MAX_TEMP_C`, and `WIND` always means `WIND_KMH`. Air quality
+  is intentionally excluded because NASA AOD cannot be honestly normalized into AQI.
 - **operator**: always `>=`. Every peril modeled here is "too much of X"; there is no real
   parametric-insurance use case in this product for "too little rain" or "too cool", so a second
   operator would be generality nothing calls.
 - **value**: a `u256`, wei-scaled the same way `premium`/`payout_amount` already are, so the
   whole contract stays on one numeric representation.
-- **window**: `SINGLE_DAY_MAX` (the worst single day in the coverage window) or `CUMULATIVE`
-  (summed across the whole window) — the only two window kinds any real policy in this product
-  needs.
+- **window**: `SINGLE_DAY_MAX` for every peril, or `CUMULATIVE` for rainfall only. Summing daily
+  maxima for heat or wind is not a meaningful insured measurement and is rejected on-chain.
 
 `check_claim`'s prompt now compares the fetched ERA5/NASA POWER numbers against this structured
 condition directly ("is `RAINFALL_MM >= 80mm` true, evaluated as the single-day max") instead of
-asking the model to interpret a sentence. The model's job is narrowed to exactly what it's good
-at: read real numbers, resolve ERA5-vs-NASA-POWER disagreement (the existing basis-risk
-reconciliation logic and Wikipedia tie-break are unchanged), and confirm whether the structured
-condition was met — the banded severity output (NONE/MINOR/MODERATE/SEVERE/INSUFFICIENT_EVIDENCE)
-still carries how far past threshold the evidence showed.
+asking the model to interpret a sentence. The model's job is narrowed to reading and normalizing
+real numbers and resolving ERA5-vs-NASA-POWER disagreement. It returns a canonical measurement;
+the contract itself evaluates whether the structured condition was met.
 
 ## Quote-band underwriting (this pass)
 
@@ -197,7 +218,7 @@ coordinates and date range:
 
 | Leg | Source | What it is |
 |---|---|---|
-| A | `archive-api.open-meteo.com` (or `air-quality-api` for the AIR peril) | ECMWF **ERA5 / ERA5-Land** reanalysis, ~9–31km grid |
+| A | `archive-api.open-meteo.com` | ECMWF **ERA5 / ERA5-Land** reanalysis, ~9–31km grid |
 | B | `power.larc.nasa.gov` | NASA **MERRA-2 / SYN1DEG** satellite-derived, ~50km grid |
 | C | `en.wikipedia.org/w/api.php` | Wikipedia search API — qualitative ground-truth corroboration |
 
@@ -215,8 +236,10 @@ examples, both independently reproducible with `curl`:
   both far above any sane threshold, so the direction is unambiguous even though the magnitudes
   differ by ~65%.
 
-The prompt tells the model exactly how to weigh this: if A and B broadly agree, band the severity
-confidently; if they disagree materially, use leg C to break the tie; if they disagree materially
+The prompt tells validators exactly how to normalize this: rainfall remains mm, heat remains
+degrees C, Open-Meteo wind is requested in km/h, NASA wind is converted from m/s to km/h, and
+`-999`/fill values are discarded. If A and B broadly agree, resolve the canonical measurement;
+if they disagree materially, use leg C to break the tie; if they disagree materially
 **and** C is empty or off-location, return `INSUFFICIENT_EVIDENCE` rather than picking a side.
 It is explicitly told not to average the two numbers.
 
@@ -256,7 +279,7 @@ LLM involved — before a policy is ever written to storage:
    BAND_MULTIPLIER[risk_band])`, so `payout_amount` can never exceed `multiple * premium` once
    the exact-transaction-value check has passed.
 2. **Concentration cap**: `payout_amount <= pool_balance_after_premium / 5`. A single new policy
-   can never be responsible for more than 20% of the pool, so one SEVERE verdict cannot wipe out
+   can never be responsible for more than 20% of the pool, so one qualifying trigger cannot wipe out
    the backing for every other ticket.
 3. **Aggregate solvency invariant**: `outstanding_liability` — the sum of `payout_amount` across
    every policy currently `ACTIVE` or `CHECKING` — can never exceed `pool_balance`. Gate 2 alone
@@ -313,15 +336,30 @@ LEADER_TIMEOUT are surfaced as retryable states rather than hard errors
 
 ## Deployed contract (StudioNet)
 
-- **Address**: `0x723B3eD974fB0E5f9A5a04C51D86935C3EcCAb2f`
-- **Explorer**: https://explorer-studio.genlayer.com/address/0x723B3eD974fB0E5f9A5a04C51D86935C3EcCAb2f
-- **Deploy tx**: `0x8083e7a7696944bb269e5c7ed1cdda83eded8cbbd3d419eb08b111df2248237e`
+- **Address**: `0x12eDBfD43d0cc1Be9DC090Bbe35bA66578b9A2ED`
+- **Explorer**: https://explorer-studio.genlayer.com/address/0x12eDBfD43d0cc1Be9DC090Bbe35bA66578b9A2ED
+- **Deploy tx**: `0x5a5c689d6e521efd1fb4e32573a14b2e4bf22a475bf4dcc71a22156cd9a4be72`
 
-This is the current deployment, carrying structured thresholds, quote-band underwriting,
-`fund_pool`, the wei-scaling prompt fix, and every gate from earlier passes (the real-
-meteorological-API evidence layer, the no-retroactive-cover guard). `.env.local`,
-`scripts/verify-schema.mjs`'s target, and this document all point at it. Schema check: `node
-scripts/verify-schema.mjs` -> `Schema verified for 0x723B3eD974fB0E5f9A5a04C51D86935C3EcCAb2f.`
+This is the current deployment, carrying the Aug 10 review fixes: canonical provider units,
+numeric trigger settlement, safe production quote discovery support, structured thresholds,
+quote-band underwriting, and all solvency and no-retroactive-cover gates. `.env.local` and this
+document point at it.
+
+### Current corrected deployment proof
+
+The fresh deployment is not bare. These writes were finalized against the address above:
+
+| Step | Tx | Verified state |
+|---|---|---|
+| Deploy corrected contract | `0x5a5c689d6e521efd1fb4e32573a14b2e4bf22a475bf4dcc71a22156cd9a4be72` | Execution `SUCCESS`, one-round majority agreement |
+| Seed shared pool with 1000 GEN | `0xe0bebc04c18834c042a9435b354f2cac4a2a61d43e3a9231fcc70eae3911f642` | `pool_balance = 1000 GEN`, no policy created |
+| Price Houston RAIN >= 80 mm | `0x5ceb712f08bf085e5118c8d5832ae855c2b230ad4b9bff6b59ef1825d78ccbc6` | `RLQ-1`, `LOW`, exact premium `0.133333333333333334 GEN` |
+| Buy the finalized quote | `0x87337a4be2fe6b52d96be381e3e188f776c90847545a7655a967a85273502f68` | `RLQ-1.consumed = true`; `RLN-1` copied every quoted term |
+
+Direct reads after purchase show `quote_count = 1`, `policy_count = 1`, pool balance
+`1000.133333333333333334 GEN`, and outstanding liability `2 GEN`. The policy is `ACTIVE`; its
+future coverage ends at `2026-08-10T14:02:14Z`, so no claim result is fabricated before the
+insured window closes.
 
 Two earlier deploys of this pass are superseded and kept only in git history: one hit a real
 `TypeError: Rainline.__init__() takes 1 positional argument but 2 were given` from passing an
@@ -345,7 +383,7 @@ one step earlier by the existing `coverage_end > coverage_start` ordering check,
 together leave no lexicographic way around it. Both paths have tests. An unreadable clock fails
 closed.
 
-### Real on-chain proof (not simulated)
+### Historical full-flow proof (pre-Aug 10 settlement correction)
 
 The `genlayer` CLI's `write` command hardcodes `value: 0n`, so it cannot exercise any payable
 method (`fund_pool`, `buy_policy_from_quote`). `scripts/onchain-verify.mjs` uses `genlayer-js`
@@ -353,7 +391,9 @@ directly — `createClient`, `createAccount`, `writeContract` with a real non-ze
 `waitForTransactionReceipt` — to run the full fund -> quote -> buy -> claim flow with actual GEN
 on StudioNet.
 
-**All four steps have been exercised on-chain against `0x723B…Ab2f`, with real GEN.**
+The following real transactions prove the earlier quote/buy/claim plumbing against superseded
+deployment `0x723B…Ab2f`. They are not presented as proof of the new numeric-trigger logic; that
+logic is covered by 67 direct tests and the reviewer-specific live quote-to-buy integration test.
 
 | Step | Tx | Result |
 |---|---|---|
@@ -430,7 +470,7 @@ suite's `_window()` helper) from ~20s to several minutes.
 python -m pytest tests/direct/ -v
 ```
 
-Result: **64 passed**. Coverage added this pass: quote creation and every stored field, the
+Result: **67 passed**. Coverage includes quote creation and every stored field, the
 quote-expiry boundary on both sides (`QUOTE_TTL_SECONDS = 2400`), UNPRICEABLE quotes refused at
 purchase, each risk band's correct premium/payout relationship, buying from an expired or
 already-consumed quote reverting, the exact-transaction-value requirement (both underpayment and
@@ -439,7 +479,8 @@ rounds-up case, and the minimum-premium floor engaging on a tiny requested payou
 `fund_pool` crediting balance without creating a policy, and the aggregate liability invariant
 still binding across multiple quotes. `check_claim` against the structured threshold is covered
 by the pre-existing basis-risk-disagreement and both-sources-agree tests, updated for the
-structured condition shape.
+structured condition shape, plus adversarial tests proving severity prose cannot override a
+below-threshold measurement and cannot suppress a measurement exactly equal to the trigger.
 
 #### Integration tests (`tests/integration/`, gltest against StudioNet)
 
@@ -447,21 +488,26 @@ structured condition shape.
 python -m pytest tests/integration/ -v -s --network studionet
 ```
 
-Because `buy_policy` (now `request_quote` / `buy_policy_from_quote`) refuses retroactive cover,
-these derive a short coverage window starting seconds in the future via `_window()` at call time,
-rather than hardcoding a date that would go stale mid-run.
+Because the contract refuses retroactive cover, integration windows are generated from the real
+clock. The reviewer-specific purchase proof uses a one-hour lead time so even a slow or retried
+quote round remains purchasable.
 
-Result: **8 passed** across two runs. The first full run (1658.49s / 27m38s, dominated by the live
-`check_claim` consensus round) got 7/8 on the first pass — `test_buy_from_quote_rejects_payout_exceeding_solvency_gate`
-failed with a `ConnectionResetError` from StudioNet's RPC mid-poll (`('Connection aborted.',
-ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host'...))`),
-a transient network failure, not a code defect — the transaction itself was never rejected by the
-contract, the poll for its receipt was. Re-running that one test in isolation passed cleanly in
-156.85s. Kept both runs here rather than only reporting the clean one: covers deploy, `fund_pool`
-crediting balance without a policy, a real `request_quote` + `buy_policy_from_quote` round with a
-real risk band and rationale printed to stdout, a rejected wrong-value purchase, the solvency gate
-rejecting an oversized request on-chain, a rejected unknown-quote purchase, a rejected pre-window
-claim check, and a live `check_claim` consensus round resolving to a valid severity band.
+Current reviewer proof:
+
+```
+gltest tests/integration/test_rainline_integration.py::test_finalized_quote_is_found_by_production_reads_and_purchased -v -s --network studionet
+```
+
+Result: **1 passed in 170.81s**. The test deployed and funded a fresh contract, finalized a real
+`LOW` quote, found it through the same `get_summary` + `get_quote` strategy used in production,
+paid its exact `133333333333333334` wei premium, verified `quote.consumed == true`, and verified
+the resulting policy copied the quote id, premium, payout, peril, and active status. It contains
+no `UNPRICEABLE` early-return path, so it cannot report success without purchasing a policy.
+
+The broader historical StudioNet suite previously completed all eight deploy, funding, rejection,
+purchase, and live claim scenarios; those runs predate the Aug 10 numeric-settlement correction.
+The corrected claim arithmetic is covered by the 67-test direct suite, including explicit tests
+that contradictory severity prose cannot override the resolved numeric value.
 
 ### Static checks
 

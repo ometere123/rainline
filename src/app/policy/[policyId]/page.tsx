@@ -40,7 +40,7 @@ export default async function PolicyDetail({ params }: { params: Promise<{ polic
           <Panel label="Clock ends" value={displayTime(policy.coverage_end)} />
           <Panel label="Opened" value={displayTime(policy.created_at)} />
           <Panel label="Staked to Cistern" value={formatGen(policy.premium)} />
-          <Panel label="Pays out if severe" value={formatGen(policy.payout_amount)} />
+          <Panel label="Pays if trigger is met" value={formatGen(policy.payout_amount)} />
           <Panel label="Readings pulled" value={String(policy.check_attempts)} />
         </div>
 
@@ -66,6 +66,15 @@ export default async function PolicyDetail({ params }: { params: Promise<{ polic
                 <span className="text-xs text-[hsl(var(--muted-foreground))]">Read pulled {displayTime(policy.last_check_at)}</span>
               </div>
               <p className="mt-3 text-sm leading-6">{policy.severity_rationale}</p>
+              {policy.resolution_status === "RESOLVED" ? (
+                <div className="mt-4 rl-gauge">
+                  <span className="rl-tag">Canonical measurement</span>
+                  <div className="rl-mono mt-2 text-sm">
+                    {(Number(policy.resolved_value_milli) / 1000).toLocaleString()} {policy.resolved_unit}
+                    {policy.trigger_met ? " - stored trigger met" : " - stored trigger not met"}
+                  </div>
+                </div>
+              ) : null}
               <div className="mt-5 grid gap-4 md:grid-cols-3">
                 <EvidenceBlock label="Gauge read (stations)" text={policy.station_summary} />
                 <EvidenceBlock label="Sky read (satellite)" text={policy.satellite_summary} />

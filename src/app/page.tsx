@@ -10,8 +10,8 @@ const readingLine: Array<{ n: string; title: string; body: string; kind: "det" |
   { n: "05", title: "Station gauge read", body: "Once coverage ends, validators independently fetch weather-station data for the exact coordinates and window.", kind: "nondet" },
   { n: "06", title: "Sky read", body: "A second, independent fetch, satellite or precipitation summary for the same location and dates.", kind: "nondet" },
   { n: "07", title: "Ground read", body: "A third fetch, local news and community reports that corroborate or contradict the instruments.", kind: "nondet" },
-  { n: "08", title: "Consensus verdict", body: "gl.eq_principle.prompt_comparative reconciles all three reads into one banded call against your structured threshold: NONE, MINOR, MODERATE, SEVERE, or static.", kind: "nondet" },
-  { n: "09", title: "Payout or static", body: "MODERATE/SEVERE pays out from the Cistern automatically. Static logs an abstention and reopens for retry, never a silent denial.", kind: "det" },
+  { n: "08", title: "Consensus measurement", body: "gl.eq_principle.prompt_comparative normalizes both providers and reconciles disagreement into one canonical numeric value, or records insufficient evidence.", kind: "nondet" },
+  { n: "09", title: "Exact trigger settlement", body: "The contract compares that value with the numeric threshold stored at purchase. A met trigger pays; insufficient evidence reopens for retry.", kind: "det" },
 ];
 
 const whyHard: Array<[string, string]> = [
@@ -28,7 +28,7 @@ const howItWorks: Array<[string, string]> = [
   ["Buy at the priced premium", "The quote comes back with a risk band and an exact required premium. Paying it is the only way to open a ticket, at the exact terms already quoted."],
   ["The clock runs, untouched", "Coverage sits ACTIVE. The deterministic gate that unlocks a reading simply hasn't opened yet, nothing to trust in the meantime."],
   ["Anyone pulls the reading", "Once the window closes, check_claim is permissionless. A keeper, a neighbor, or the holder themselves can call it."],
-  ["Validators log what they found", "Consensus reconciles the three reads into a severity band against your structured threshold and writes it, rationale included, to the ticket."],
+  ["Validators log what they found", "Consensus reconciles normalized readings into a canonical measurement; deterministic contract arithmetic then evaluates the stored trigger."],
   ["Static reopens, it doesn't close", "Conflicting or thin evidence logs as static. The ticket stays claimable; a cooldown, not a denial, stands between it and a retry."],
 ];
 

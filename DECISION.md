@@ -13,13 +13,14 @@ aside when the owner chose it.
 ## The product
 
 A farmer, market-stall owner, or outdoor events operator buys a policy against one peril
-(rain, heat, wind, or air quality) at one location for a coverage window, paying a premium in
+(rain, heat, or wind) at one location for a coverage window, paying a premium in
 native GEN into a shared pool. After the window ends, anyone can permissionlessly trigger
 `check_claim`, which fetches weather-station data, a satellite/precipitation-style summary, and
 local news/community reports for that location and window, and asks GenLayer consensus to
-reconcile them into a banded severity verdict. MODERATE or SEVERE pays the policyholder out of
-the pool automatically; NONE or MINOR resolves with no payout; conflicting or missing evidence
-returns INSUFFICIENT_EVIDENCE, which is retryable rather than final.
+normalize and reconcile them into one canonical numeric measurement. The contract compares that
+measurement with the exact trigger stored on the policy; a met trigger pays automatically, a
+miss declines, and conflicting or missing evidence returns INSUFFICIENT_EVIDENCE, which is
+retryable rather than final.
 
 ## Counterfactual: why not a single oracle or backend
 
@@ -37,18 +38,17 @@ threshold, and pays or denies. Two distrusting parties sit on either side of tha
 A single backend, even a well-intentioned one, is *both* the party that decides and the party
 with a financial stake in that decision, or is trusted blindly by both sides if run by a third
 party. GenLayer removes that single point of trust: independent validators each fetch the
-evidence themselves inside consensus and must reach the same categorical verdict before a
-transfer is authorized.
+evidence themselves inside consensus and must agree on a normalized measurement and its side of
+the stored threshold before deterministic contract arithmetic can authorize a transfer.
 
 ## Why the payout decision is irreducibly semantic
 
 This is not "read one deterministic price/weather feed and compare to a number." Three
 qualitatively different evidence types are combined for every claim:
 
-1. **Weather-station data** — numeric but noisy, station-sparse in rural/small-farm areas, and
-   frequently reported with hedging language ("near-record", "isolated pockets of").
-2. **Satellite/precipitation-summary text** — a narrative characterization of conditions over an
-   area, not a single number for a single coordinate.
+1. **ERA5 reanalysis data** — numeric but gridded at roughly 9-31km resolution.
+2. **NASA POWER data** — numeric but independently modeled at roughly 50km resolution and, for
+   wind, expressed in m/s rather than the policy's canonical km/h.
 3. **Local news/community reports** — free-text corroboration or contradiction ("flooding
    reported in the district" vs. "dry spell continues") that a deterministic parser cannot
    reliably reconcile against the other two.
@@ -58,8 +58,8 @@ and by how much — requires judgement: is a station reading representative of t
 coordinates, does a satellite summary corroborate or contradict it, do local reports change the
 picture, and is the combined picture even complete enough to decide at all. That is exactly the
 class of question `gl.eq_principle.prompt_comparative` exists for: validators must independently
-gather the same evidence and agree at the level of meaning (a severity band), not at the level
-of an identical byte-for-byte computation.
+gather the same evidence, normalize units and missing values, and agree on a canonical numeric
+measurement and which side of the stored threshold it falls.
 
 ## Non-determinism budget
 
@@ -71,8 +71,8 @@ independently kept inside the project's 2-4 nondet-operation budget:
 1. `gl.nondet.web.render(...)` — fetch weather-station style evidence for the location/window.
 2. `gl.nondet.web.render(...)` — fetch satellite/precipitation-summary style evidence.
 3. `gl.nondet.web.render(...)` — fetch local news/community-report style evidence.
-4. `gl.nondet.exec_prompt(...)` — reconcile all three sources into one banded verdict with a
-   supporting rationale, returned as JSON.
+4. `gl.nondet.exec_prompt(...)` — reconcile normalized evidence into `resolved_value_milli` or
+   an explicit abstention, with a supporting rationale returned as JSON.
 
 This sits at the top of the target 2-4 operation budget deliberately: dropping any one of the
 three fetches would remove exactly the cross-source reconciliation that makes the decision
@@ -223,9 +223,9 @@ Every terminal state has an explicit resting place for funds:
   other policyholders (wants no payout without real evidence). See counterfactual above.
 - **B — Native value at stake**: premiums and payouts are real GEN moving through
   `@gl.public.write.payable` and `emit_transfer`, not a side-channel record.
-- **C — Irreducibly semantic decision**: reconciling numeric station data, narrative satellite
-  summaries, and free-text local reports into one severity band is judgement, not a
-  deterministic feed comparison.
+- **C — Irreducibly semantic decision**: deciding which normalized gridded measurement represents
+  the insured location when independent providers disagree, using location-specific reports as
+  corroboration, is judgement. Once resolved, the threshold comparison itself is deterministic.
 - **D — Evidence fetched contract-side**: all three `gl.nondet.web.render` calls happen inside
   the leader function of the same consensus round that produces the verdict.
 - **E — Reusable, not a one-shot demo**: any number of policies, perils, and locations can be

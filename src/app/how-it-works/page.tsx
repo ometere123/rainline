@@ -17,7 +17,7 @@ const steps = [
   },
   {
     title: "05. Validators log a verdict",
-    body: "GenLayer validators each independently gather the same three reads and reconcile them into a severity band: NONE, MINOR, MODERATE, or SEVERE. MODERATE and SEVERE draw an automatic payout from the Cistern. No adjuster signs off, and no insurer's word decides it.",
+    body: "GenLayer validators independently gather the same three reads, normalize them into the policy's canonical unit, and reconcile disagreement into one numeric measurement. The contract then compares that value with the stored threshold itself. No narrative label or insurer can override the arithmetic.",
   },
   {
     title: "06. Static isn't a denial",

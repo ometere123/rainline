@@ -70,6 +70,47 @@ export async function listQuotesByRequester(account: `0x${string}`): Promise<Quo
   }))) ?? [];
 }
 
+export type QuoteFingerprint = Pick<
+  Quote,
+  "peril" | "location_label" | "latitude" | "longitude" | "threshold_value" | "window" |
+  "coverage_start" | "coverage_end" | "requested_payout"
+>;
+
+/** Find the quote created by a finalized request using the contract's authoritative global
+ * sequence and direct quote reads. The requester-filtered view is intentionally not used here:
+ * it has returned an empty list for finalized StudioNet writes due to address encoding. Scanning
+ * every ID created after our pre-write snapshot also avoids mistaking a concurrent user's quote
+ * for ours. */
+export async function findFinalizedQuote(
+  countBefore: bigint,
+  requester: `0x${string}`,
+  expected: QuoteFingerprint,
+): Promise<Quote> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const summary = await getSummary();
+    const countAfter = BigInt(summary.quote_count);
+    for (let sequence = countAfter; sequence > countBefore; sequence -= 1n) {
+      const quote = await getQuote(`RLQ-${sequence}`);
+      if (quote && quoteMatches(quote, requester, expected)) return quote;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1500));
+  }
+  throw new Error("Quote request finalized, but its on-chain quote record was not found.");
+}
+
+function quoteMatches(quote: Quote, requester: string, expected: QuoteFingerprint) {
+  return quote.requester.toLowerCase() === requester.toLowerCase()
+    && quote.peril === expected.peril
+    && quote.location_label === expected.location_label
+    && quote.latitude === expected.latitude
+    && quote.longitude === expected.longitude
+    && quote.threshold_value === expected.threshold_value
+    && quote.window === expected.window
+    && quote.coverage_start === expected.coverage_start
+    && quote.coverage_end === expected.coverage_end
+    && quote.requested_payout === expected.requested_payout;
+}
+
 export async function writeContract(
   client: Client,
   functionName: string,

@@ -94,7 +94,7 @@ function eventArgs() {
   // historical date) so the no-retroactive-cover guard is satisfied honestly rather than
   // reusing a known past event.
   const now = new Date();
-  const start = new Date(now.getTime() + 5 * 60 * 1000); // 5 min out
+  const start = new Date(now.getTime() + 60 * 60 * 1000); // 1h out for slow/retried quote consensus
   const end = new Date(start.getTime() + 60 * 60 * 1000); // 1h window
   const fmt = (d) => d.toISOString().replace(/\.\d+Z$/, "Z");
 

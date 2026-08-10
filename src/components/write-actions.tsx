@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { listQuotesByRequester, waitAccepted, writeContract } from "@/lib/genlayer/contract";
+import { findFinalizedQuote, getSummary, waitAccepted, writeContract } from "@/lib/genlayer/contract";
 import { formatGen, displayTime } from "@/lib/format";
 import { METRIC_BY_PERIL, METRIC_UNIT, formatThreshold, type Quote } from "@/lib/types";
 import { useTransactions } from "./transaction-provider";
@@ -12,7 +12,6 @@ const PERILS = [
   { value: "RAIN", label: "Rain / flood" },
   { value: "HEAT", label: "Extreme heat" },
   { value: "WIND", label: "Wind" },
-  { value: "AIR", label: "Air quality" },
 ];
 
 const WINDOWS = [
@@ -143,8 +142,13 @@ export function RequestQuoteThenBuy() {
     try {
       const client = await wallet.getWriteClient();
       const address = client.account?.address as `0x${string}` | undefined;
+      if (!address) throw new Error("Connect a wallet before requesting a quote.");
       const thresholdValueWei = BigInt(Math.round(Number(state.thresholdValue))) * 1_000_000_000_000_000_000n;
       const requestedPayoutWei = BigInt(Math.round(Number(state.requestedPayout))) * 1_000_000_000_000_000_000n;
+      const summaryBefore = await getSummary();
+      const countBefore = BigInt(summaryBefore.quote_count);
+      const coverageStart = toIso(state.start);
+      const coverageEnd = toIso(state.end);
       const hash = await writeContract(
         client,
         "request_quote",
@@ -155,8 +159,8 @@ export function RequestQuoteThenBuy() {
           state.longitude,
           thresholdValueWei,
           state.window,
-          toIso(state.start),
-          toIso(state.end),
+          coverageStart,
+          coverageEnd,
           requestedPayoutWei,
         ],
         0n,
@@ -166,10 +170,18 @@ export function RequestQuoteThenBuy() {
       const receipt = await waitAccepted(client, hash);
       txs.update(hash, String(receipt.statusName ?? receipt.status ?? "ACCEPTED") as never);
 
-      const quotes = address ? await listQuotesByRequester(address) : [];
-      const latest = quotes[quotes.length - 1];
-      if (!latest) throw new Error("Quote request finalized but no quote was found.");
-      setQuote(latest);
+      const finalizedQuote = await findFinalizedQuote(countBefore, address, {
+        peril: state.peril as Quote["peril"],
+        location_label: state.location,
+        latitude: state.latitude,
+        longitude: state.longitude,
+        threshold_value: thresholdValueWei.toString(),
+        window: state.window as Quote["window"],
+        coverage_start: coverageStart,
+        coverage_end: coverageEnd,
+        requested_payout: requestedPayoutWei.toString(),
+      });
+      setQuote(finalizedQuote);
       setStep("result");
     } catch (err) {
       setError(writeErrorMessage(err, "Requesting a quote failed."));
@@ -216,7 +228,11 @@ export function RequestQuoteThenBuy() {
           <select
             className="rl-input mt-2 w-full"
             value={state.peril}
-            onChange={(event) => setState({ ...state, peril: event.target.value })}
+              onChange={(event) => setState({
+                ...state,
+                peril: event.target.value,
+                window: event.target.value === "RAIN" ? state.window : "SINGLE_DAY_MAX",
+              })}
           >
             {PERILS.map((p) => (
               <option key={p.value} value={p.value}>
@@ -253,7 +269,7 @@ export function RequestQuoteThenBuy() {
               value={state.window}
               onChange={(event) => setState({ ...state, window: event.target.value })}
             >
-              {WINDOWS.map((w) => (
+              {WINDOWS.filter((w) => state.peril === "RAIN" || w.value === "SINGLE_DAY_MAX").map((w) => (
                 <option key={w.value} value={w.value}>
                   {w.label}
                 </option>
@@ -423,7 +439,7 @@ export function CheckClaimButton({ policyId, status }: { policyId: string; statu
       <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
         {status === "CHECKING"
           ? "The last check came back INSUFFICIENT_EVIDENCE. Anyone can retry after the cooldown; you do not need to be the policyholder."
-          : "Once coverage ends, anyone can trigger evaluation. It fetches weather-station, satellite, and local report evidence and asks GenLayer consensus for a severity verdict."}
+          : "Once coverage ends, anyone can trigger evaluation. It fetches two numeric providers plus corroboration, normalizes their units, and asks consensus to resolve one canonical measurement."}
       </p>
       <button className="rl-btn-primary mt-4 px-4 py-2 text-sm" onClick={run} disabled={busy}>
         {busy ? "Running..." : "Check claim now"}
@@ -490,4 +506,3 @@ function Field({ label, value, onChange, placeholder }: { label: string; value: 
     </label>
   );
 }
-

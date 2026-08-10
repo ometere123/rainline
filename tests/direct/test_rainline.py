@@ -148,9 +148,18 @@ def mock_claim(direct_vm, verdict="NONE", reason="No qualifying loss detected.")
         r".*wikipedia.org.*",
         {"status": 200, "body": "no local reports of flooding found"},
     )
+    resolved = {
+        "NONE": ("RESOLVED", "12000"),
+        "MINOR": ("RESOLVED", "75000"),
+        "MODERATE": ("RESOLVED", "90000"),
+        "SEVERE": ("RESOLVED", "140000"),
+        "INSUFFICIENT_EVIDENCE": ("INSUFFICIENT_EVIDENCE", "0"),
+    }[verdict]
     direct_vm.mock_llm(
         r".*claims adjuster.*",
-        f'{{"verdict":"{verdict}","station_summary":"12mm recorded","satellite_summary":"below normal","report_summary":"none found","rationale":"{reason}"}}',
+        f'{{"resolution_status":"{resolved[0]}","resolved_value_milli":"{resolved[1]}",'
+        f'"station_summary":"12 mm","satellite_summary":"9.4 mm","report_summary":"none found",'
+        f'"rationale":"{reason}"}}',
     )
 
 
@@ -569,6 +578,16 @@ def test_policy_records_structured_threshold_from_quote(contract, direct_vm, dir
     assert policy["window"] == "CUMULATIVE"
 
 
+def test_cumulative_window_is_rejected_for_non_rain_perils(contract, direct_vm, direct_alice):
+    direct_vm.sender = direct_alice
+    mock_quote(direct_vm)
+    with direct_vm.expect_revert("only supported for rainfall"):
+        contract.request_quote(
+            "WIND", "Ridge Farm", "-1.29", "36.82", 80 * GEN, "CUMULATIVE",
+            COVERAGE_START, COVERAGE_END, 2 * GEN,
+        )
+
+
 # --- check_claim: coverage-window gate ---
 
 
@@ -635,7 +654,7 @@ def test_minor_verdict_also_declines(contract, direct_vm, direct_alice):
     assert contract.get_policy(pid)["status"] == "DECLINED"
 
 
-def test_moderate_verdict_pays_out(contract, direct_vm, direct_alice):
+def test_resolved_value_above_stored_trigger_pays_out(contract, direct_vm, direct_alice):
     pid = buy_policy(contract, direct_vm, direct_alice, requested_payout=8 * GEN, risk_band="MODERATE")
     warp_to(direct_vm, AFTER_END)
     mock_claim(direct_vm, "MODERATE", "Threshold clearly crossed.")
@@ -644,9 +663,13 @@ def test_moderate_verdict_pays_out(contract, direct_vm, direct_alice):
     policy = contract.get_policy(pid)
     assert policy["status"] == "PAID_OUT"
     assert policy["verdict"] == "MODERATE"
+    assert policy["resolution_status"] == "RESOLVED"
+    assert policy["resolved_value_milli"] == "90000"
+    assert policy["resolved_unit"] == "mm"
+    assert policy["trigger_met"] is True
 
 
-def test_severe_verdict_pays_out(contract, direct_vm, direct_alice):
+def test_resolved_value_far_above_stored_trigger_pays_out(contract, direct_vm, direct_alice):
     pid = buy_policy(contract, direct_vm, direct_alice, requested_payout=8 * GEN, risk_band="MODERATE")
     warp_to(direct_vm, AFTER_END)
     mock_claim(direct_vm, "SEVERE", "Threshold crossed by a wide margin.")
@@ -755,6 +778,46 @@ def test_check_claim_clamps_unrecognized_verdict_to_insufficient(contract, direc
     assert contract.get_policy(pid)["verdict"] == "INSUFFICIENT_EVIDENCE"
 
 
+def test_severity_words_cannot_override_numeric_trigger(contract, direct_vm, direct_alice):
+    pid = buy_policy(contract, direct_vm, direct_alice, requested_payout=8 * GEN)
+    warp_to(direct_vm, AFTER_END)
+    direct_vm.clear_mocks()
+    direct_vm.mock_web(r".*archive-api\.open-meteo\.com.*", {"status": 200, "body": "{}"})
+    direct_vm.mock_web(r".*power\.larc\.nasa\.gov.*", {"status": 200, "body": "{}"})
+    direct_vm.mock_web(r".*wikipedia.org.*", {"status": 200, "body": "{}"})
+    direct_vm.mock_llm(
+        r".*claims adjuster.*",
+        '{"resolution_status":"RESOLVED","resolved_value_milli":"79000",'
+        '"verdict":"SEVERE","station_summary":"79 mm","satellite_summary":"79 mm",'
+        '"report_summary":"severe wording","rationale":"Narrative says severe."}',
+    )
+    direct_vm.sender = direct_alice
+    contract.check_claim(pid)
+    policy = contract.get_policy(pid)
+    assert policy["trigger_met"] is False
+    assert policy["status"] == "DECLINED"
+
+
+def test_numeric_trigger_pays_even_if_narrative_label_says_none(contract, direct_vm, direct_alice):
+    pid = buy_policy(contract, direct_vm, direct_alice, requested_payout=8 * GEN)
+    warp_to(direct_vm, AFTER_END)
+    direct_vm.clear_mocks()
+    direct_vm.mock_web(r".*archive-api\.open-meteo\.com.*", {"status": 200, "body": "{}"})
+    direct_vm.mock_web(r".*power\.larc\.nasa\.gov.*", {"status": 200, "body": "{}"})
+    direct_vm.mock_web(r".*wikipedia.org.*", {"status": 200, "body": "{}"})
+    direct_vm.mock_llm(
+        r".*claims adjuster.*",
+        '{"resolution_status":"RESOLVED","resolved_value_milli":"80000",'
+        '"verdict":"NONE","station_summary":"80 mm","satellite_summary":"80 mm",'
+        '"report_summary":"none","rationale":"Exact threshold."}',
+    )
+    direct_vm.sender = direct_alice
+    contract.check_claim(pid)
+    policy = contract.get_policy(pid)
+    assert policy["trigger_met"] is True
+    assert policy["status"] == "PAID_OUT"
+
+
 def test_check_claim_abstains_when_numeric_sources_conflict_without_corroboration(
     contract, direct_vm, direct_alice
 ):
@@ -777,7 +840,7 @@ def test_check_claim_abstains_when_numeric_sources_conflict_without_corroboratio
     direct_vm.mock_web(r".*wikipedia.org.*", {"status": 200, "body": "no results found"})
     direct_vm.mock_llm(
         r".*claims adjuster.*",
-        '{"verdict":"INSUFFICIENT_EVIDENCE","station_summary":"ERA5 105.0 mm",'
+        '{"resolution_status":"INSUFFICIENT_EVIDENCE","resolved_value_milli":"0","station_summary":"ERA5 105.0 mm",'
         '"satellite_summary":"NASA POWER 21.9 mm","report_summary":"none found",'
         '"rationale":"Sources differ by ~5x with no corroborating local report."}',
     )
@@ -809,7 +872,7 @@ def test_check_claim_pays_out_when_both_numeric_sources_agree_severe(
     )
     direct_vm.mock_llm(
         r".*claims adjuster.*",
-        '{"verdict":"SEVERE","station_summary":"ERA5 142.0 mm","satellite_summary":"NASA POWER 128.4 mm",'
+        '{"resolution_status":"RESOLVED","resolved_value_milli":"135000","station_summary":"ERA5 142.0 mm","satellite_summary":"NASA POWER 128.4 mm",'
         '"report_summary":"severe flooding reported","rationale":"Both sources far exceed threshold and local reports corroborate."}',
     )
     direct_vm.sender = direct_alice

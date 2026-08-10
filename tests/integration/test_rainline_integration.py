@@ -84,34 +84,45 @@ def _request_quote(
     as_holder, coverage_start, coverage_end,
     threshold_value=80 * GEN, window="SINGLE_DAY_MAX", requested_payout=2 * GEN,
 ):
-    receipt = _retryable(lambda: as_holder.request_quote(
-        args=[
-            "RAIN",
-            "Test Valley Farm",
-            "-1.29",
-            "36.82",
-            threshold_value,
-            window,
-            coverage_start,
-            coverage_end,
-            requested_payout,
-        ],
-    ).transact(wait_interval=10000, wait_retries=90))
-    assert tx_execution_succeeded(receipt), receipt.get("consensus_data")
-    return receipt
+    last_receipt = None
+    for attempt in range(3):
+        receipt = _retryable(lambda: as_holder.request_quote(
+            args=[
+                "RAIN",
+                "Test Valley Farm",
+                "-1.29",
+                "36.82",
+                threshold_value,
+                window,
+                coverage_start,
+                coverage_end,
+                requested_payout,
+            ],
+        ).transact(wait_interval=10000, wait_retries=120))
+        if tx_execution_succeeded(receipt):
+            return receipt
+        last_receipt = receipt
+        print(f"Quote attempt {attempt + 1} did not execute successfully:", receipt)
+        time.sleep(10)
+    raise AssertionError(f"Quote failed after three finalized attempts: {last_receipt}")
+
+
+def _find_finalized_quote(contract, count_before, expected):
+    """Mirror the production lookup: use authoritative summary and direct quote reads, then
+    match the submitted terms so a concurrent request cannot be mistaken for this one."""
+    count_after = int(contract.get_summary(args=[]).call()["quote_count"])
+    assert count_after > count_before
+    for sequence in range(count_after, count_before, -1):
+        quote = contract.get_quote(args=[f"RLQ-{sequence}"]).call()
+        if all(str(quote[key]) == str(value) for key, value in expected.items()):
+            return quote
+    raise AssertionError("Finalized quote was not found through summary/get_quote reads")
 
 
 def _latest_quote(contract, holder):
-    """Read the just-created quote by its deterministic id (RLQ-{quote_count}) instead of
-    trusting list_quotes_by_requester's holder-address filter, which was observed directly on
-    real StudioNet traffic to come back empty for a request that had already finalized
-    successfully -- most likely an address-encoding mismatch between the eth_account object
-    gltest hands back from get_accounts() and the Address string the contract records as
-    gl.message.sender_address, not a propagation delay (retrying that same filtered read for 30s
-    still found nothing). quote_count from get_summary is authoritative regardless of that."""
+    del holder
     summary = contract.get_summary(args=[]).call()
-    quote_id = f"RLQ-{summary['quote_count']}"
-    return contract.get_quote(args=[quote_id]).call()
+    return contract.get_quote(args=[f"RLQ-{summary['quote_count']}"]).call()
 
 
 def test_deploy_succeeds():
@@ -133,17 +144,28 @@ def test_fund_pool_credits_balance_without_a_policy():
     assert summary["policy_count"] == 0
 
 
-def test_request_quote_and_buy_policy_on_chain():
+def test_finalized_quote_is_found_by_production_reads_and_purchased():
     contract = _deploy()
     accounts = get_accounts()
     holder = accounts[0]
     as_holder = contract.connect(holder)
     _fund(as_holder)
-    coverage_start, coverage_end = _window()
+    coverage_start, coverage_end = _window(start_in=3600)
 
+    count_before = int(contract.get_summary(args=[]).call()["quote_count"])
     _request_quote(as_holder, coverage_start, coverage_end, requested_payout=2 * GEN)
 
-    quote = _latest_quote(contract, holder)
+    quote = _find_finalized_quote(contract, count_before, {
+        "peril": "RAIN",
+        "location_label": "Test Valley Farm",
+        "latitude": "-1.29",
+        "longitude": "36.82",
+        "threshold_value": str(80 * GEN),
+        "window": "SINGLE_DAY_MAX",
+        "coverage_start": coverage_start,
+        "coverage_end": coverage_end,
+        "requested_payout": str(2 * GEN),
+    })
     assert quote["peril"] == "RAIN"
     assert quote["op"] == ">="
     assert quote["threshold_value"] == str(80 * GEN)
@@ -156,11 +178,9 @@ def test_request_quote_and_buy_policy_on_chain():
     print("Quote climatology summary:", quote["climatology_summary"])
     print("Required premium:", quote["required_premium"])
 
-    if quote["risk_band"] == "UNPRICEABLE":
-        # Cannot buy from an UNPRICEABLE quote by design; verify the refusal on-chain and stop.
-        receipt = as_holder.buy_policy_from_quote(args=[quote["id"]]).transact(value=1 * GEN)
-        assert tx_execution_failed(receipt)
-        return
+    assert quote["risk_band"] != "UNPRICEABLE", (
+        "This integration proof must purchase a finalized quote, not silently skip the buy"
+    )
 
     premium = int(quote["required_premium"])
     before = int(contract.get_summary(args=[]).call()["pool_balance"])
@@ -178,6 +198,7 @@ def test_request_quote_and_buy_policy_on_chain():
     assert policies[0]["quote_id"] == quote["id"]
     assert policies[0]["premium"] == str(premium)
     assert policies[0]["payout_amount"] == str(2 * GEN)
+    assert contract.get_quote(args=[quote["id"]]).call()["consumed"] is True
 
 
 def test_buy_from_quote_rejects_wrong_value():

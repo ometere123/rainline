@@ -1,19 +1,17 @@
-export type Peril = "RAIN" | "HEAT" | "WIND" | "AIR";
+export type Peril = "RAIN" | "HEAT" | "WIND";
 
-export type Metric = "RAINFALL_MM" | "MAX_TEMP_C" | "WIND_KMH" | "AQI";
+export type Metric = "RAINFALL_MM" | "MAX_TEMP_C" | "WIND_KMH";
 
 export const METRIC_BY_PERIL: Record<Peril, Metric> = {
   RAIN: "RAINFALL_MM",
   HEAT: "MAX_TEMP_C",
   WIND: "WIND_KMH",
-  AIR: "AQI",
 };
 
 export const METRIC_UNIT: Record<Metric, string> = {
   RAINFALL_MM: "mm",
   MAX_TEMP_C: "°C",
   WIND_KMH: "km/h",
-  AQI: "AQI",
 };
 
 export type ThresholdWindow = "SINGLE_DAY_MAX" | "CUMULATIVE";
@@ -56,6 +54,10 @@ export type Policy = {
   satellite_summary: string;
   report_summary: string;
   resolved_at: string;
+  resolution_status: "" | "RESOLVED" | "INSUFFICIENT_EVIDENCE";
+  resolved_value_milli: string;
+  resolved_unit: string;
+  trigger_met: boolean;
 };
 
 export type Quote = {
@@ -124,7 +126,6 @@ export function formatThreshold(peril: Peril, op: string, thresholdValueWei: str
     RAINFALL_MM: "rainfall",
     MAX_TEMP_C: "max temperature",
     WIND_KMH: "wind speed",
-    AQI: "air quality index",
   }[metric];
   const windowLabel = window === "SINGLE_DAY_MAX" ? "single-day max" : "cumulative over the window";
   return `${label} ${op} ${value}${unit}, ${windowLabel}`;
